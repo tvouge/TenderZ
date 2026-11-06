@@ -311,3 +311,8 @@ dialog select, dialog input { width: 100%; }
   .barre-tri .nb-ao { margin-left: 0; width: 100%; }
   .ao-apercu { margin: 0 -32px 0 -4px; padding: 12px 32px 4px 20px; }
 }
+
+/* --- dossiers à surveiller (menuiserie extérieure…) -------------------- */
+.e-veille { background: var(--bleu-pale); color: var(--bleu); }
+.anneau.veille b { font-size: .72rem; color: var(--doux); }
+.legende .etiq.e-veille { margin-right: 2px; }

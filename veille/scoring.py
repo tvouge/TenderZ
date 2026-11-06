@@ -14,12 +14,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .analyse import Analyse, a_faire, analyser, extraire_montant_texte, titre_court
+from .analyse import Analyse, a_faire, analyser, extraire_montant_texte, retirer_exterieur, titre_court
 from .models import Avis
 from .util import contient, jours_restants, normaliser
 
 CATEGORIES = ("directe", "groupement", "sous_traitance", "non_pertinente")
-NOTATION_VERSION = 3   # à incrémenter quand les règles changent : les AO sont alors renotés
+NOTATION_VERSION = 4   # à incrémenter quand les règles changent : les AO sont alors renotés
 
 
 @dataclass
@@ -32,11 +32,14 @@ class Notation:
     titre_court: str = ""
     travaux: list[dict] = field(default_factory=list)
     a_faire: list[str] = field(default_factory=list)
+    a_surveiller: bool = False   # dossier à regarder de temps en temps (ex. menuiserie extérieure)
 
 
-def _points_cpv(cpvs: list[str], table: dict) -> tuple[int, str | None]:
+def _points_cpv(cpvs: list[str], table: dict, exclus: list[str] | None = None) -> tuple[int, str | None]:
     meilleur, motif = 0, None
     for code in cpvs:
+        if any(str(code).startswith(str(x)) for x in exclus or []):
+            continue  # ex. fenêtres : menuiserie extérieure, hors activité
         for prefixe, pts in table.items():
             if str(code).startswith(str(prefixe)) and pts > meilleur:
                 meilleur, motif = pts, f"CPV {code} (+{pts})"
@@ -81,19 +84,21 @@ def noter(avis: Avis, profil: dict, idf: bool) -> Notation:
 
     # 1. Contenu : CPV + mots-clés, plafonné
     metier = 0
-    pts, motif = _points_cpv(avis.cpv, profil["cpv"])
+    pts, motif = _points_cpv(avis.cpv, profil["cpv"], profil.get("cpv_exclus"))
     if motif:
         metier += pts
         detail.append(motif)
 
+    # « menuiserie » dans « menuiseries extérieures » ne désigne pas notre métier
+    titre_metier, corps_metier = retirer_exterieur(titre), retirer_exterieur(corps)
     for groupe, poids in (("forts", 25), ("moyens", 12), ("contexte", 5)):
-        mot = _premier_mot(titre, mc.get(groupe, []))
+        mot = _premier_mot(titre_metier, mc.get(groupe, []))
         if mot:
             metier += poids
             detail.append(f"« {mot} » dans l'objet (+{poids})")
             continue
         # Dans le corps de l'avis, les mots comptent à moitié
-        mot = _premier_mot(corps, mc.get(groupe, []))
+        mot = _premier_mot(corps_metier, mc.get(groupe, []))
         if mot and groupe != "contexte":
             metier += poids // 2
             detail.append(f"« {mot} » dans la description (+{poids // 2})")
@@ -141,6 +146,19 @@ def noter(avis: Avis, profil: dict, idf: bool) -> Notation:
             score += perim["hors_metier_important"]
             detail.append(f"Périmètre en partie hors métier (~{part} % : {', '.join(a.hors_metier)}) ({perim['hors_metier_important']})")
 
+    # À surveiller : dossier centré sur ce que l'atelier ne fait pas vraiment (menuiserie extérieure),
+    # sans métier ADR ni autre motif de rejet. Conservé même avec un score bas.
+    mots_sv = (profil.get("a_surveiller") or {}).get("mots", [])
+    a_surveiller = bool(
+        _premier_mot(titre, mots_sv) and not a.adr
+        and not any(contient(titre, m) for m in profil.get("mots_negatifs", []) if m not in mots_sv)
+    )
+    travaux = a.travaux
+    if a_surveiller:
+        libelle = profil["a_surveiller"].get("libelle", "À surveiller")
+        travaux = [{"n": libelle, "t": "veille"}] + [t for t in travaux if t["t"] != "hors" or t["n"] != "Menuiseries extérieures"]
+        detail.append(f"{libelle} : hors activité principale, rangé dans « À surveiller »")
+
     # 4. Budget
     montant = avis.montant_estime or extraire_montant_texte(avis.description)
     if cfg.get("budget"):
@@ -152,8 +170,8 @@ def noter(avis: Avis, profil: dict, idf: bool) -> Notation:
     categorie = categoriser(avis, score, titre, profil)
     return Notation(
         score=score, categorie=categorie, detail=detail, idf=idf,
-        montant=montant, titre_court=titre_court(avis.titre), travaux=a.travaux,
-        a_faire=a_faire(avis, profil),
+        montant=montant, titre_court=titre_court(avis.titre), travaux=travaux,
+        a_faire=a_faire(avis, profil), a_surveiller=a_surveiller,
     )
 
 

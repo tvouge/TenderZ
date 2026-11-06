@@ -484,3 +484,34 @@ def test_apercu_a_faire_extrait_de_l_avis():
     assert not any("plateforme" in p or "Plâtrerie" in p for p in pts)
     assert a_faire(avis_test("x", ""), PROFIL) == []
     assert len(a_faire(avis_test("x", "Menuiserie bois. " * 40 + "Portes palières."), PROFIL, maxi=3)) <= 3
+
+
+def test_menuiserie_exterieure_hors_activite():
+    ext = noter(avis_test("Remplacement des menuiseries extérieures bois d'une école", cpv=("45421132",)), PROFIL, True)
+    assert ext.score < PROFIL["seuils"]["pertinent"]
+    assert not any(t["n"] == "Menuiserie intérieure" for t in ext.travaux)
+    assert ext.a_surveiller and {"n": "Menuiserie extérieure", "t": "veille"} in ext.travaux
+    assert not any(d.startswith("CPV 45421132") for d in ext.detail)
+    interieur = noter(avis_test("Menuiseries intérieures bois d'une école", cpv=("45421000",)), PROFIL, True)
+    assert interieur.score >= PROFIL["seuils"]["synthese_auto"]
+    # Un mot générique « menuiserie » dans « menuiseries extérieures » ne compte pas, mais le reste de l'avis si
+    mixte = noter(avis_test("Menuiseries extérieures et agencement de la banque d'accueil", cpv=()), PROFIL, True)
+    assert any("agencement" in d for d in mixte.detail) and not any(d.startswith("« menuiserie") and "(+" in d for d in mixte.detail)
+    from veille.analyse import a_faire
+    pts = a_faire(avis_test("x", "Remplacement des menuiseries extérieures bois. Pose de portes intérieures en chêne."), PROFIL)
+    assert pts == ["Pose de portes intérieures en chêne."]
+
+
+def test_menuiserie_exterieure_conservee_a_part(store):
+    # Score nul, mais gardée en base pour l'onglet « À surveiller »
+    ext = boamp.vers_avis(ligne_boamp(idweb="26-200001", objet="Remplacement des menuiseries extérieures bois du groupe scolaire"))
+    assert collect.integrer(store, ext, True, PROFIL) == "nouveau"
+    doc = store.get(ext.id)
+    assert doc["score"] < PROFIL["seuils"]["pertinent"] and doc["categorie"] == "non_pertinente"
+    assert any(t["t"] == "veille" for t in doc["travaux"]) and doc["synthese_statut"] == "aucune"
+    # Un dossier qui contient du métier ADR n'est pas « à surveiller », même avec des menuiseries extérieures
+    mixte = noter(avis_test("Menuiseries extérieures et agencement de l'accueil"), PROFIL, True)
+    assert not mixte.a_surveiller
+    # Hors sujet (nettoyage de fenêtres) : toujours écarté
+    sale = boamp.vers_avis(ligne_boamp(idweb="26-200002", objet="Nettoyage des fenêtres des bâtiments communaux"))
+    assert collect.integrer(store, sale, True, PROFIL) == "ignore"

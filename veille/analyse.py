@@ -11,6 +11,17 @@ from dataclasses import dataclass, field
 from .models import Avis
 from .util import contient, normaliser
 
+# --- Menuiserie extérieure : hors activité de l'atelier ----------------------------
+
+_RE_EXTERIEUR = re.compile(r"\bmenuiseries? exterieures?(?:\s+(?:en\s+)?(?:bois|aluminium|alu|pvc|mixtes?|metalliques?))*")
+
+
+def retirer_exterieur(texte_norm: str) -> str:
+    """Enlève « menuiseries extérieures » (texte normalisé) pour qu'un mot générique comme
+    « menuiserie » ne compte pas comme du métier ADR."""
+    return _RE_EXTERIEUR.sub(" ", texte_norm)
+
+
 # --- Budget ---------------------------------------------------------------
 
 _MOT_MONTANT = r"(?:montant|valeur|budget|enveloppe|estim\w*|pr[ée]visionnel\w*)"
@@ -42,8 +53,11 @@ _LIMITES = {"adr": 4, "ss": 2, "hors": 2}
 _RE_LOT = re.compile(r"\blots?\s*(?:n°|no|numero)?\s*0*(\d+)")
 
 
-def _trouver(texte_norm: str, groupes: list[dict]) -> list[str]:
-    return [g["nom"] for g in groupes if any(contient(texte_norm, m) for m in g["mots"])]
+_GENERIQUES = {"menuiserie", "menuiseries"}
+
+
+def _trouver(texte_norm: str, groupes: list[dict], ignorer: set[str] = frozenset()) -> list[str]:
+    return [g["nom"] for g in groupes if any(contient(texte_norm, m) for m in g["mots"] if normaliser(m) not in ignorer)]
 
 
 @dataclass
@@ -70,16 +84,21 @@ def analyser(avis: Avis, profil: dict) -> Analyse:
     voc = profil["travaux"]
     titre = normaliser(" ".join([avis.titre, *avis.descripteurs]))
     texte = normaliser(" ".join([avis.titre, *avis.descripteurs, avis.description]))
+    texte_metier = retirer_exterieur(texte)
+    # Un avis qui parle de menuiserie extérieure : le mot « menuiserie » seul (souvent un simple
+    # descripteur BOAMP) ne prouve plus que le dossier relève de notre menuiserie intérieure.
+    mots_ext = (profil.get("a_surveiller") or {}).get("mots", [])
+    ignorer = _GENERIQUES if any(contient(texte, m) for m in mots_ext) else frozenset()
     a = Analyse(
-        adr=_trouver(texte, voc["adr"]),
-        sous_traite=_trouver(texte, voc["sous_traite"]),
+        adr=_trouver(texte_metier, voc["adr"], ignorer),
+        sous_traite=_trouver(texte_metier, voc["sous_traite"]),
         hors_metier=_trouver(texte, voc["hors_metier"]),
     )
 
     # Marché alloti ? Un lot métier est-il identifiable ?
     a.alloti = len(set(_RE_LOT.findall(texte))) >= 2
     mots_adr = [m for g in voc["adr"] for m in g["mots"]]
-    lignes = [normaliser(x) for x in re.split(r"[\n;]", f"{avis.titre}\n{avis.description}")]
+    lignes = [retirer_exterieur(normaliser(x)) for x in re.split(r"[\n;]", f"{avis.titre}\n{avis.description}")]
     a.lot_isolable = any(_RE_LOT.search(l) and any(contient(l, m) for m in mots_adr) for l in lignes)
 
     for indice in profil.get("indices_cotraitance", []):
@@ -117,7 +136,7 @@ def a_faire(avis: Avis, profil: dict, maxi: int = 5, long_max: int = 170) -> lis
     vus: set[str] = set()
     for brut in _RE_COUPE.split(avis.description):
         phrase = re.sub(r"\s+", " ", brut).strip(" -–—:,")
-        norm = normaliser(phrase)
+        norm = retirer_exterieur(normaliser(phrase))
         if len(phrase) < 12 or norm in vus:
             continue
         vus.add(norm)

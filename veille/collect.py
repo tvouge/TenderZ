@@ -97,7 +97,7 @@ def integrer(store: Store, avis: Avis, idf: bool, profil: dict) -> str:
         # Avis d'origine inconnu (publié avant la fenêtre) : suivi comme un AO à part
 
     note = noter(avis, profil, idf)
-    if note.score < profil["seuils"]["conserver"]:
+    if note.score < profil["seuils"]["conserver"] and not note.a_surveiller:
         return "ignore"
 
     existant = store.get(avis.id) or store.par_cle_doublon(avis.cle_doublon)

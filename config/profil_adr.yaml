@@ -94,6 +94,19 @@ mots_cles:
     - boutique
     - exposition
 
+# Codes CPV sans points : travaux de menuiserie extérieure (fenêtres), que l'atelier ne fait pas
+# (ils restent collectés : voir « a_surveiller » ci-dessous).
+cpv_exclus: ["45421132", "45421112"]
+
+# Dossiers peu proches de l'atelier, à parcourir de temps en temps : ils ne figurent pas dans la liste
+# principale mais dans l'onglet « À surveiller » (et sont conservés même avec un score très bas).
+# Ici : la menuiserie extérieure. Un dossier qui contient aussi du métier ADR (agencement, portes…) reste
+# dans la liste principale, avec l'étiquette « hors métier ».
+a_surveiller:
+  libelle: Menuiserie extérieure
+  mots: [menuiserie extérieure, menuiseries extérieures, menuiseries extérieures aluminium, menuiserie aluminium,
+         menuiseries aluminium, fenêtre, fenêtres, châssis, volets, persiennes, baies vitrées, pvc]
+
 # Mots qui font baisser le score (hors cœur de métier).
 mots_negatifs:    # -30
   - nettoyage
@@ -113,6 +126,13 @@ mots_negatifs:    # -30
   - menuiseries aluminium
   - menuiseries extérieures aluminium
   - pvc
+  # ADR ne fait pas de menuiserie extérieure
+  - menuiserie extérieure
+  - menuiseries extérieures
+  - fenêtre
+  - fenêtres
+  - châssis
+  - volets
 
 # Bonus géographique
 bonus_idf: 15
@@ -191,7 +211,7 @@ travaux:
     - nom: Gros œuvre et structure
       mots: [gros œuvre, maçonnerie, démolition, terrassement, charpente, couverture, étanchéité, façade, façades, ravalement, désamiantage, vrd, ascenseur, ascenseurs]
     - nom: Menuiseries extérieures
-      mots: [menuiserie extérieure, menuiseries extérieures, fenêtres, châssis, volets, stores, menuiserie aluminium, menuiseries aluminium, pvc]
+      mots: [menuiserie extérieure, menuiseries extérieures, fenêtre, fenêtres, châssis, volets, persiennes, baies vitrées, stores, menuiserie aluminium, menuiseries aluminium, pvc]
 
 
 # Indices d'un marché global → réponse en groupement ou sous-traitance
@@ -251,7 +271,7 @@ ted:
     - "45421100"
     - "45421130"
     - "45421131"
-    - "45421132"
+    - "45421132"   # fenêtres : menuiserie extérieure, suivie dans l'onglet « À surveiller »
     - "45421140"
     - "45421150"
     - "45421151"

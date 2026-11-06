@@ -34,6 +34,7 @@ const ONGLETS = [
   ["clos", "Gagnés / perdus", ["gagne", "perdu"]],
   ["abandonne", "Abandonnés", ["abandonne"]],
   ["manques", "Faute de ressources", []], // règle propre : voir estManque()
+  ["surveiller", "À surveiller", []],     // règle propre : voir estASurveiller()
   ["tous", "Tous", Object.keys(STATUTS)],
 ];
 const CATEGORIES = {
@@ -395,6 +396,11 @@ function delaiTropCourt(a) {
 const estManque = (a) => (a.statut === "a_qualifier" && delaiTropCourt(a))
   || (a.statut === "abandonne" && ["charge_atelier", "delai_insuffisant"].includes(a.motif_abandon));
 
+// Dossiers que l'atelier ne traite pas vraiment (ex. menuiserie extérieure) : hors liste principale,
+// à parcourir de temps en temps. Marqués par la collecte (étiquette de type « veille »).
+const estASurveiller = (a) => (a.travaux || []).some((t) => t.t === "veille");
+const enVeille = (a) => estASurveiller(a) && a.statut === "a_qualifier";
+
 const ACRONYMES = new Set(["ZAC", "PLV", "ERP", "DCE", "CPAM", "IUT", "IDF", "HLM", "TCE", "RATP", "SNCF", "CHU", "PMR", "ESAT", "CFA", "EHPAD", "CCAS", "OPH"]);
 // Repli côté navigateur tant que le titre court n'est pas calculé par la collecte
 function titreCourt(a) {
@@ -466,6 +472,7 @@ function pointsAFaire(a) {
     const par = (t) => (a.travaux || []).filter((x) => x.t === t).map((x) => x.n);
     if (par("adr").length) pts.push(`À faire par l'atelier : ${par("adr").join(", ")}`);
     if (par("ss").length) pts.push(`À confier à un sous-traitant : ${par("ss").join(", ")}`);
+    if (par("veille").length) pts.push(`${par("veille")[0]} : hors de l'activité principale de l'atelier, à parcourir de temps en temps`);
     if (par("hors").length) pts.push(`Hors métier, à ne pas chiffrer : ${par("hors").join(", ")}`);
     source = "Déduit du titre de l'avis";
   }
@@ -485,7 +492,8 @@ function apercuHtml(a, ouvert) {
 function carteAO(a, dansManques) {
   const [u, j] = urgence(a);
   const niveau = a.score === null || a.score === undefined ? "manuel" : a.score >= SEUIL_SYNTHESE ? "haut" : a.score >= SEUIL_PERTINENT ? "moyen" : "bas";
-  const anneau = niveau === "manuel" ? `<div class="anneau manuel" title="Ajout manuel : pas de score"><b>+</b></div>`
+  const anneau = estASurveiller(a) ? `<div class="anneau manuel veille" title="Hors activité principale : pas de score de pertinence"><b>ext.</b></div>`
+    : niveau === "manuel" ? `<div class="anneau manuel" title="Ajout manuel : pas de score"><b>+</b></div>`
     : `<div class="anneau" style="--p:${Math.max(0, Math.min(100, a.score))}" title="${esc((a.score_detail || []).join("\n") || "Score de pertinence")}"><b>${esc(a.score)}</b></div>`;
   const etiquettes = (a.travaux || []).map((t) => `<span class="etiq e-${esc(t.t)}" title="${esc(SENS_ETIQUETTE[t.t] || "")}">${esc(t.n)}</span>`).join("");
   const lieu = libelleLieu(a.lieu);
@@ -495,7 +503,7 @@ function carteAO(a, dansManques) {
   return `<article class="ao n-${niveau} u-${u}" data-id="${esc(a.id)}">
     ${anneau}
     <div class="ao-corps">
-      <div class="ao-haut"><span class="ao-cat c-${esc(a.categorie)}">${esc(CATEGORIES[a.categorie] || a.categorie)}</span>${badges(a)}</div>
+      <div class="ao-haut"><span class="ao-cat c-${esc(a.categorie)}">${esc(estASurveiller(a) ? "Hors activité principale" : (CATEGORIES[a.categorie] || a.categorie))}</span>${badges(a)}</div>
       <div class="ao-titre" title="${esc(a.titre)}"><a href="#/ao/${encodeURIComponent(a.id)}">${esc(titreCourt(a))}</a></div>
       ${etiquettes ? `<div class="ao-etiq">${etiquettes}</div>` : ""}
       <div class="ao-meta">
@@ -553,15 +561,19 @@ function filtrer(aos, f) {
   const onglet = ONGLETS.find((o) => o[0] === f.onglet) || ONGLETS[0];
   const texte = f.texte.trim().toLowerCase();
   return aos.filter((a) => {
-    if (f.onglet === "manques") { if (!estManque(a)) return false; }
+    const veille = f.onglet === "surveiller";
+    if (veille) { if (!enVeille(a) || urgence(a)[0] === "expiree") return false; }
+    else if (f.onglet === "manques") { if (!estManque(a) || enVeille(a)) return false; }
     else if (!onglet[2].includes(a.statut)) return false;
-    // Non commencé et trop proche de l'échéance : rangé dans « Faute de ressources »
-    else if (f.onglet === "a_qualifier" && delaiTropCourt(a)) return false;
-    if (f.categorie === "pertinentes" && a.categorie === "non_pertinente") return false;
-    if (f.categorie && f.categorie !== "pertinentes" && a.categorie !== f.categorie) return false;
+    // Non commencé et trop proche de l'échéance : rangé dans « Faute de ressources » ;
+    // menuiserie extérieure & co : rangés dans « À surveiller »
+    else if (f.onglet === "a_qualifier" && (delaiTropCourt(a) || enVeille(a))) return false;
+    // Dans « À surveiller », ni score ni type de réponse ne filtrent : ces dossiers n'ont pas de pertinence à mesurer
+    if (!veille && f.categorie === "pertinentes" && a.categorie === "non_pertinente") return false;
+    if (!veille && f.categorie && f.categorie !== "pertinentes" && a.categorie !== f.categorie) return false;
     if (f.urgence && urgence(a)[0] !== f.urgence) return false;
     // Les ajouts manuels (sans score) restent toujours visibles
-    if (f.scoreMin && a.score !== null && a.score !== undefined && a.score < Number(f.scoreMin)) return false;
+    if (!veille && f.scoreMin && a.score !== null && a.score !== undefined && a.score < Number(f.scoreMin)) return false;
     if (f.miens && a.responsable?.email !== etat.utilisateur.email) return false;
     if (texte && !`${a.titre} ${a.acheteur} ${a.lieu} ${a.ref}`.toLowerCase().includes(texte)) return false;
     return true;
@@ -590,7 +602,11 @@ function vueListe() {
   const focus = document.activeElement?.id;
 
   const dansManques = f.onglet === "manques";
-  const noteOnglet = dansManques ? `<p class="aide note-onglet">Dossiers que l'équipe n'a pas pu traiter faute de temps ou de ressources : non commencés à moins de ${DELAI_MIN_REPONSE} jours de l'échéance (ou échéance dépassée), et dossiers abandonnés pour délai insuffisant ou charge de l'atelier.</p>` : "";
+  const notes = {
+    manques: `Dossiers que l'équipe n'a pas pu traiter faute de temps ou de ressources : non commencés à moins de ${DELAI_MIN_REPONSE} jours de l'échéance (ou échéance dépassée), et dossiers abandonnés pour délai insuffisant ou charge de l'atelier.`,
+    surveiller: "Dossiers peu proches de l'atelier, par exemple la menuiserie extérieure. Ils n'entrent pas dans la liste principale : on les parcourt de temps en temps, au cas où l'un d'eux vaudrait le coup.",
+  };
+  const noteOnglet = notes[f.onglet] ? `<p class="aide note-onglet">${notes[f.onglet]}</p>` : "";
   const corps = !liste.length ? `<p class="vide">Aucun appel d'offres ne correspond à ces filtres.</p>`
     : f.vue === "tableau" ? htmlTableau(liste, grouper) : htmlCartes(liste, grouper, dansManques);
 
@@ -985,7 +1001,7 @@ async function vueBilan() {
   const aTraiter = pertinents.filter((a) => ["a_qualifier", "pris_en_charge", "en_redaction"].includes(a.statut)
     && !(a.statut === "a_qualifier" && delaiTropCourt(a)));
   const aQualifier = pertinents.filter((a) => a.statut === "a_qualifier" && !delaiTropCourt(a)).length;
-  const manques = aos.filter((a) => estManque(a) && a.categorie !== "non_pertinente" && (a.score == null || a.score >= SEUIL_PERTINENT)).length;
+  const manques = aos.filter((a) => estManque(a) && !estASurveiller(a) && a.categorie !== "non_pertinente" && (a.score == null || a.score >= SEUIL_PERTINENT)).length;
   const echeances = aTraiter
     .map((a) => ({ a, j: joursRestants(a.date_limite) }))
     .filter((x) => x.j !== null && x.j >= 0)
