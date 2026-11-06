@@ -189,4 +189,4 @@ ted:
 # --- Récapitulatif par mail -------------------------------------------
 recap:
   jour: lundi              # le récap complet part ce jour-là
-  url_site: "https://VOTRE-PROJET.web.app"
+  url_site: "https://tenderzadr.netlify.app"
