@@ -134,9 +134,17 @@ const ETATS_SYNTHESE = {
   en_cours: ["p-urgente", "⏳ Synthèse en cours"],
   erreur: ["p-critique", "⚠ Synthèse en échec"],
 };
+// Synthèse rédigée sur l'avis seul (aucune pièce du DCE) : lancée automatiquement
+// au-dessus du seuil de score, ou à la demande sans DCE déposé.
+const surAvisSeul = (ao) => (ao.synthese_pieces || []).length <= 1;
 const pastilleSynthese = (ao) => {
   const e = ETATS_SYNTHESE[ao.synthese_statut];
-  return e ? `<span class="pastille ${e[0]}">${e[1]}</span>` : "";
+  if (!e) return "";
+  const libelle = ao.synthese_statut === "prete" && surAvisSeul(ao) ? "✓ Synthèse prête (avis seul)" : e[1];
+  const aide = ao.synthese_statut === "prete" && surAvisSeul(ao)
+    ? ` title="Rédigée sur l'avis uniquement, sans pièces du DCE. Lancée automatiquement pour les AO dont le score est d'au moins ${SEUIL_SYNTHESE}."`
+    : "";
+  return `<span class="pastille ${e[0]}"${aide}>${libelle}</span>`;
 };
 
 function legendeScores() {
@@ -575,6 +583,7 @@ function blocSynthese(ao) {
   const criteres = (s.criteres_attribution || []).length ? `<section><h3>Critères d'attribution</h3><ul>${s.criteres_attribution.map((c) => `<li>${esc(c.critere)}${c.poids ? ` — <b>${esc(c.poids)}</b>` : ""}</li>`).join("")}</ul></section>` : "";
   return `<h2>Synthèse</h2>
     <p class="aide">Rédigée le ${fmtDate(ao.synthese_le)} à partir de : ${(ao.synthese_pieces || []).map(esc).join(", ")}. À vérifier sur les pièces officielles.</p>
+    ${surAvisSeul(ao) ? `<p class="aide">Cette synthèse ne repose que sur l'avis de marché, sans pièces du DCE. Elle est lancée automatiquement pour les AO dont le score est d'au moins ${SEUIL_SYNTHESE}. Déposez le DCE puis relancez-la pour une analyse complète.</p>` : ""}
     <div class="reco reco-${esc(s.recommandation)}"><b>${esc(RECOS[s.recommandation] || s.recommandation)}</b><span>${esc(s.justification)}</span></div>
     <p>${esc(s.resume)}</p>
     ${liste("Points majeurs", s.points_majeurs)}
