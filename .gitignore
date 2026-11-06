@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+memoire_locale.json
+.venv/
+.env
+service-account*.json
+.firebase/
+node_modules/
+*-debug.log

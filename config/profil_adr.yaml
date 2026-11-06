@@ -1,0 +1,192 @@
+# =====================================================================
+#  Profil de veille — L'Atelier du Renard (ADR)
+#  Ce fichier pilote la collecte et la notation. Il peut être modifié
+#  sans toucher au code : chaque modification poussée sur GitHub est
+#  prise en compte à la collecte suivante.
+# =====================================================================
+
+# Fenêtre de recherche : on relit toujours les N derniers jours de
+# publications (chevauchement anti-omission). Les doublons sont écartés
+# grâce à la mémoire Firestore.
+fenetre_jours: 21
+
+# Départements franciliens (couverture renforcée, tous mots-clés métier)
+departements_idf: ["75", "77", "78", "91", "92", "93", "94", "95"]
+
+# Hors Île-de-France, on ne remonte que les dossiers très spécialisés
+# (scénographie, muséographie, stands…) : mots-clés « nationaux ».
+mots_cles_nationaux:
+  - scénographie
+  - muséographie
+  - stand
+  - agencement
+  - mobilier sur mesure
+  - ébénisterie
+
+# --- Notation de pertinence (score sur 100) ---------------------------
+
+# Codes CPV et points associés. Un code « parent » (ex. 45421000)
+# couvre ses sous-codes (45421100, 45421151…).
+cpv:
+  "45421": 30   # Travaux de menuiserie (et tous les sous-codes)
+  "454211": 30  # Installation de portes, fenêtres, éléments en bois
+  "4542115": 30 # Cuisines équipées, cloisons, meubles encastrés
+  "45420": 20   # Travaux de menuiserie et charpenterie
+  "39154": 30   # Matériel pour stands d'exposition
+  "3915": 25    # Mobilier divers (39150000)
+  "391": 15     # Mobilier (39100000)
+  "3913": 10    # Mobilier de bureau
+  "3914": 10    # Mobilier domestique / cuisine
+  "45450": 8    # Autres travaux d'achèvement
+  "454": 5      # Travaux d'achèvement de bâtiment
+  "79952": 8    # Services d'organisation d'événements
+  "92521": 15   # Services de musées (muséographie)
+
+# Mots-clés recherchés dans l'objet et la description (insensible aux
+# accents et à la casse). Le score ne compte chaque groupe qu'une fois.
+mots_cles:
+  forts:          # +25
+    - agencement
+    - menuiserie intérieure
+    - menuiseries intérieures
+    - mobilier sur mesure
+    - scénographie
+    - muséographie
+    - ébénisterie
+    - banque d'accueil
+    - banques d'accueil
+    - habillage mural
+    - habillages muraux
+    - claustra
+    - stand
+    - PLV
+    - aménagement intérieur
+    - aménagements intérieurs
+  moyens:         # +12
+    - menuiserie
+    - menuiseries
+    - mobilier
+    - second œuvre
+    - portes
+    - comptoir
+    - bar
+    - cuisine
+    - loges
+    - espace VIP
+    - hospitalité
+    - boiseries
+    - parquet
+  contexte:       # +5 (types de lieux ADR)
+    - musée
+    - théâtre
+    - salle de spectacle
+    - stade
+    - gymnase
+    - école
+    - collège
+    - lycée
+    - université
+    - médiathèque
+    - bibliothèque
+    - hôtel
+    - bureaux
+    - commerce
+    - boutique
+    - exposition
+
+# Mots qui font baisser le score (hors cœur de métier).
+mots_negatifs:    # -30
+  - nettoyage
+  - gardiennage
+  - assurance
+  - informatique
+  - logiciel
+  - voirie
+  - assainissement
+  - espaces verts
+  - denrées
+  - restauration collective
+  - carburant
+  - téléphonie
+  - fournitures de bureau
+  - menuiserie aluminium
+  - menuiseries aluminium
+  - menuiseries extérieures aluminium
+  - pvc
+
+# Bonus géographique
+bonus_idf: 15
+
+# Indices d'un marché global → réponse en groupement ou sous-traitance
+indices_groupement:
+  - tous corps d'état
+  - tous corps d'etat
+  - tce
+  - entreprise générale
+  - conception-réalisation
+  - conception réalisation
+  - macro-lot
+  - macrolot
+  - marché global
+  - lot unique
+
+# Seuils
+seuils:
+  conserver: 15          # en dessous, l'avis n'est pas enregistré
+  pertinent: 40          # au-dessus, l'avis est « à qualifier »
+  synthese_auto: 65      # synthèse IA automatique de l'avis au-dessus
+                          # de ce score (sans DCE). 0 = désactivé
+  # Si vous changez « pertinent » ou « synthese_auto », reportez les mêmes
+  # valeurs dans web/app.js (SEUIL_PERTINENT et SEUIL_SYNTHESE) pour les couleurs.
+
+# Urgence (jours avant la date limite)
+urgence:
+  critique: 10
+  urgente: 21
+
+# --- Sources ----------------------------------------------------------
+
+boamp:
+  actif: true
+  # Natures d'avis BOAMP collectées
+  natures: ["APPEL_OFFRE", "RECTIFICATIF", "ANNULATION", "ATTRIBUTION", "PRE-INFORMATION"]
+
+ted:
+  actif: true
+  pays_acheteur: FRA
+  # Codes NUTS Île-de-France (place d'exécution)
+  nuts_idf_prefixe: "FR1"
+  # Champs demandés à l'API TED v3 (à ajuster si l'API évolue)
+  champs:
+    - publication-number
+    - notice-title
+    - buyer-name
+    - publication-date
+    - deadline-receipt-tender-date-lot
+    - classification-cpv
+    - place-of-performance
+    - notice-type
+    - links
+  # Codes CPV interrogés sur TED (correspondance exacte)
+  cpv_requete:
+    - "45420000"
+    - "45421000"
+    - "45421100"
+    - "45421130"
+    - "45421131"
+    - "45421132"
+    - "45421140"
+    - "45421150"
+    - "45421151"
+    - "45421152"
+    - "45421153"
+    - "39100000"
+    - "39130000"
+    - "39150000"
+    - "39154000"
+    - "92521000"
+
+# --- Récapitulatif par mail -------------------------------------------
+recap:
+  jour: lundi              # le récap complet part ce jour-là
+  url_site: "https://VOTRE-PROJET.web.app"

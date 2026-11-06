@@ -1,0 +1,30 @@
+name: Synthèses IA
+
+on:
+  schedule:
+    # Toutes les 30 minutes en journée ouvrée (7 h – 20 h, heure de Paris en hiver)
+    - cron: "*/30 6-19 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: synthese
+  cancel-in-progress: false
+
+jobs:
+  synthese:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Rédiger les synthèses demandées
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}
+        run: python -m veille.synthesis --max 10

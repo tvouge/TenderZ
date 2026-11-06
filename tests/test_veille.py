@@ -1,0 +1,385 @@
+import io
+import json
+import zipfile
+from datetime import date, datetime, timedelta
+
+import pytest
+
+from veille import collect, digest
+from veille.documents import Piece, assembler, extraire
+from veille.models import Avis
+from veille.scoring import noter, urgence
+from veille.sources import boamp, ted
+from veille.store import FichierStore
+from veille.util import PARIS, charger_profil, contient, normaliser, parser_date
+
+PROFIL = charger_profil()
+DANS = lambda j: (datetime.now(PARIS) + timedelta(days=j)).strftime("%Y-%m-%dT12:00:00+01:00")
+
+
+def ligne_boamp(**k):
+    base = {
+        "idweb": "26-100001",
+        "objet": "Travaux d'agencement et menuiserie intérieure du musée Carnavalet",
+        "nomacheteur": "Ville de Paris",
+        "code_departement": ["75"],
+        "dateparution": date.today().isoformat(),
+        "datelimitereponse": DANS(30),
+        "nature": "APPEL_OFFRE",
+        "type_marche": ["TRAVAUX"],
+        "descripteur_libelle": ["Menuiserie"],
+        "url_avis": "https://www.boamp.fr/pages/avis/?q=idweb:26-100001",
+    }
+    base.update(k)
+    return base
+
+
+DONNEES = {
+    "FNSimple": {
+        "initial": {
+            "natureMarche": {"description": "Lot 4 : menuiseries intérieures bois, habillages muraux et banque d'accueil"},
+            "CPV": {"objetPrincipal": {"classPrincipale": "45421000"}},
+            "renseignementsRecours": {"description": "Tribunal administratif de Paris, assurance nettoyage"},
+        }
+    }
+}
+
+
+# --- utilitaires -----------------------------------------------------------
+
+def test_normaliser_et_contient():
+    assert normaliser("Second Œuvre  ÉLÉMENTS") == "second oeuvre elements"
+    assert contient(normaliser("Création d'un bar et d'un stand"), "bar")
+    assert not contient(normaliser("Barrières de sécurité"), "bar")
+    assert not contient(normaliser("standard téléphonique"), "stand")
+
+
+def test_parser_date_formats():
+    assert parser_date("2026-11-20").hour == 23
+    assert parser_date("20261120").day == 20
+    assert parser_date("2026-11-20+01:00").tzinfo is not None
+    assert parser_date("2026-11-20T12:00:00Z").hour == 12
+    assert parser_date("pas une date") is None
+    assert parser_date(["2026-12-01", "2026-11-20"]).day == 20
+
+
+# --- BOAMP -----------------------------------------------------------------
+
+def test_boamp_conversion_et_cpv():
+    a = boamp.vers_avis(ligne_boamp(annonce_lie="26-099999"), json.loads(json.dumps(DONNEES)))
+    assert a.id == "boamp-26-100001"
+    assert a.nature == "appel_offre"
+    assert a.cpv == ["45421000"]
+    assert "banque d'accueil" in a.description
+    assert "Tribunal" not in a.description  # bloc recours exclu
+    assert a.avis_lies == ["26-099999"]
+
+
+def test_boamp_requetes():
+    r = boamp.requetes(PROFIL, date(2026, 10, 15))
+    assert "dateparution >= date'2026-10-15'" in r[0][1]
+    assert 'code_departement="93"' in r[0][1]
+    assert '"scénographie"' in r[1][1]
+
+
+# --- TED -------------------------------------------------------------------
+
+def test_ted_conversion():
+    n = {
+        "publication-number": "712345-2026",
+        "notice-title": {"fra": "France – Mobilier – Agencement de la BnF", "eng": "France – Furniture"},
+        "buyer-name": {"fra": ["Bibliothèque nationale de France"]},
+        "publication-date": "2026-11-02+01:00",
+        "deadline-receipt-tender-date-lot": ["2026-12-10+01:00"],
+        "classification-cpv": ["39150000", "45421000"],
+        "place-of-performance": ["FRA", "FR101"],
+        "notice-type": "cn-standard",
+        "links": {"html": {"FRA": "https://ted.europa.eu/fr/notice/-/detail/712345-2026"}},
+    }
+    a = ted.vers_avis(n)
+    assert a.titre.startswith("France – Mobilier")
+    assert a.acheteur == "Bibliothèque nationale de France"
+    assert a.nature == "appel_offre"
+    assert ted.est_idf(a)
+    assert a.date_limite.day == 10
+    assert "classification-cpv IN (45420000" in ted.construire_requete(PROFIL, date(2026, 10, 15))
+
+
+# --- notation ---------------------------------------------------------------
+
+def test_notation_directe_idf():
+    a = boamp.vers_avis(ligne_boamp(), DONNEES)
+    n = noter(a, PROFIL, idf=True)
+    assert n.score >= 70
+    assert n.categorie == "directe"
+
+
+def test_notation_groupement():
+    a = boamp.vers_avis(ligne_boamp(objet="Réhabilitation tous corps d'état du collège Jean Jaurès"), DONNEES)
+    n = noter(a, PROFIL, idf=True)
+    assert n.categorie == "groupement"
+
+
+def test_notation_hors_metier():
+    a = boamp.vers_avis(ligne_boamp(objet="Marché de nettoyage des locaux administratifs", descripteur_libelle=["Nettoyage"]))
+    n = noter(a, PROFIL, idf=True)
+    assert n.score < PROFIL["seuils"]["conserver"]
+    # Le mot « assurance » dans le bloc recours ne doit pas pénaliser un bon avis
+    a2 = boamp.vers_avis(ligne_boamp(), DONNEES)
+    assert not any("assurance" in d for d in noter(a2, PROFIL, True).detail)
+
+
+def test_attribution_sous_traitance():
+    a = boamp.vers_avis(ligne_boamp(nature="ATTRIBUTION", titulaire="Bouygues Bâtiment"), DONNEES)
+    assert noter(a, PROFIL, True).categorie == "sous_traitance"
+
+
+def test_urgence():
+    for jours, attendu in ((5, "critique"), (15, "urgente"), (40, "normale"), (-2, "expiree")):
+        a = Avis(source="x", ref="1", titre="t", url="u", date_limite=parser_date(DANS(jours)))
+        assert urgence(a, PROFIL)[0] == attendu
+
+
+# --- mémoire et dédoublonnage -----------------------------------------------
+
+@pytest.fixture
+def store(tmp_path):
+    return FichierStore(tmp_path / "m.json")
+
+
+def test_cycle_complet(store):
+    a = boamp.vers_avis(ligne_boamp(), DONNEES)
+    assert collect.integrer(store, a, True, PROFIL) == "nouveau"
+    doc = store.get(a.id)
+    assert doc["statut"] == "a_qualifier" and doc["synthese_statut"] == "demandee"
+
+    # Même avis relu à la collecte suivante : pas de doublon
+    assert collect.integrer(store, boamp.vers_avis(ligne_boamp(), DONNEES), True, PROFIL) == "inchange"
+
+    # Même consultation remontée par TED : rattachée, pas recréée
+    t = Avis(source="ted", ref="1-2026", titre=a.titre, url="https://ted/1", acheteur=a.acheteur, date_limite=a.date_limite, cpv=["45421000"])
+    assert collect.integrer(store, t, True, PROFIL) == "inchange"
+    assert store.get(a.id)["autres_sources"] == ["https://ted/1"]
+    assert store.get(t.id) is None
+
+    # Rectificatif BOAMP avec report de date
+    rect = boamp.vers_avis(ligne_boamp(idweb="26-100050", nature="RECTIFICATIF", annonce_lie="26-100001", datelimitereponse=DANS(45)))
+    assert collect.integrer(store, rect, True, PROFIL) == "rattache"
+    doc = store.get(a.id)
+    assert doc["modifie"] and doc["rectificatifs"] == ["26-100050"]
+    assert doc["date_limite"] == rect.date_limite
+    types = [e["type"] for e in store.data["evenements"][a.id]]
+    assert types == ["detection", "rectificatif"]
+
+    # Rectificatif déjà traité : sans effet
+    assert collect.integrer(store, rect, True, PROFIL) == "inchange"
+
+
+def test_modification_preserve_categorie_corrigee(store):
+    a = boamp.vers_avis(ligne_boamp(), DONNEES)
+    collect.integrer(store, a, True, PROFIL)
+    store.maj(a.id, {"categorie": "groupement", "categorie_corrigee": True})
+    b = boamp.vers_avis(ligne_boamp(datelimitereponse=DANS(50)), DONNEES)
+    assert collect.integrer(store, b, True, PROFIL) == "modifie"
+    assert store.get(a.id)["categorie"] == "groupement"
+
+
+# --- récapitulatif ----------------------------------------------------------
+
+def test_recap(store):
+    a = boamp.vers_avis(ligne_boamp(datelimitereponse=DANS(6)), DONNEES)
+    collect.integrer(store, a, True, PROFIL)
+    sujet, corps = digest.construire(list(store.data["aos"].values()), {"sources": {"boamp_lus": 120}, "resultats": {"nouveau": 1}, "erreurs": ["TED : HTTP 400"]}, PROFIL)
+    assert "Tenders" in sujet
+    assert "Réponse directe ADR (1)" in corps and "critique" in corps and "TED : HTTP 400" in corps
+    _, vide = digest.construire([], {"sources": {}, "resultats": {}, "erreurs": []}, PROFIL)
+    assert "Aucune opportunité pertinente" in vide
+
+
+# --- documents --------------------------------------------------------------
+
+def test_extraction_zip_docx_et_priorite():
+    import docx
+
+    d = docx.Document()
+    d.add_paragraph("CCTP lot 4 : menuiseries intérieures en chêne, classement feu M1")
+    buf_docx = io.BytesIO()
+    d.save(buf_docx)
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr("DCE/04_CCTP_lot4.docx", buf_docx.getvalue())
+        f.writestr("DCE/01_RC.txt", "Règlement de consultation : visite obligatoire le 12/11")
+        f.writestr("DCE/plan.dwg", b"\x00\x01")
+    pieces = extraire("DCE.zip", z.getvalue())
+    assert len(pieces) == 2
+    texte, scans, utilisees = assembler(pieces)
+    assert utilisees[0].endswith("01_RC.txt")
+    assert "chêne" in texte and not scans
+
+
+def test_budget_assemblage():
+    texte, _, utilisees = assembler([Piece("RC.txt", "a" * 100), Piece("CCTP.txt", "b" * 100)], budget=150)
+    assert len(texte) < 300 and utilisees[1].endswith("(tronquée)")
+
+
+# --- synthèse (Claude simulé) -------------------------------------------------
+
+def test_synthese_bout_en_bout(store, tmp_path, monkeypatch):
+    from veille import synthesis
+
+    a = boamp.vers_avis(ligne_boamp(), DONNEES)
+    collect.integrer(store, a, True, PROFIL)
+    dce = tmp_path / "RC.txt"
+    dce.write_text("Règlement : visite obligatoire le 10/11. Critères : technique 60 %, prix 40 %.", encoding="utf-8")
+    store.maj(a.id, {"documents": [{"nom": "RC.txt", "chemin": str(dce)}]})
+
+    vu = {}
+    def faux_claude(contenu):
+        vu["texte"] = contenu[-1]["text"]
+        return {"resume": "ok", "points_majeurs": ["x"], "estimation_cout": {"perimetre": "lot 4", "base": "avis", "fiabilite": "faible"},
+                "categorie_recommandee": "directe", "recommandation": "go", "justification": "ok", "visite": {"obligatoire": True}}
+    monkeypatch.setattr(synthesis, "appeler_claude", faux_claude)
+
+    for ao in store.synthese_demandee():
+        synthesis.traiter(ao, store)
+    doc = store.get(a.id)
+    assert doc["synthese_statut"] == "prete" and doc["visite_obligatoire"] is True
+    assert "technique 60 %" in vu["texte"] and "musée Carnavalet" in vu["texte"]
+    assert doc["synthese_pieces"] == ["Avis de marché", "RC.txt"]
+
+    # Une erreur de Claude est enregistrée sans bloquer la file
+    monkeypatch.setattr(synthesis, "appeler_claude", lambda c: (_ for _ in ()).throw(RuntimeError("quota")))
+    store.maj(a.id, {"synthese_statut": "demandee"})
+    synthesis.traiter(store.get(a.id), store)
+    assert store.get(a.id)["synthese_statut"] == "erreur" and "quota" in store.get(a.id)["synthese_erreur"]
+
+
+def test_destinataires_recap(monkeypatch):
+    monkeypatch.setenv("RECAP_DESTINATAIRES", "secours@adr.fr")
+    assert digest.destinataires(["lea@adr.fr", " thibaud@adr.fr ", ""]) == ["lea@adr.fr", "thibaud@adr.fr"]
+    assert digest.destinataires(None) == ["secours@adr.fr"]
+    assert digest.destinataires([]) == ["secours@adr.fr"]
+
+
+def test_referentiel_prix_du_site(store):
+    from veille import synthesis
+
+    assert synthesis._referentiel(store) == "(non renseigné par l'équipe)"  # fichier YAML vide par défaut
+    store.data["parametres"] = {"referentiel_prix": {
+        "taux_horaire_atelier": 55, "marge_cible": None, "remarques": "Laque sous-traitée",
+        "ouvrages": [{"nom": "Banque d'accueil", "unite": "ml", "prix_min": 1800, "prix_max": 2600, "note": "chêne"},
+                     {"nom": "Claustra", "unite": "m²", "prix_min": None, "prix_max": None, "note": ""}]}}
+    texte = synthesis._referentiel(store)
+    assert "Banque d'accueil" in texte and "1800" in texte and "taux_horaire_atelier: 55" in texte
+    assert "Claustra" not in texte and "marge_cible" not in texte and "Laque" in texte
+
+
+def test_synthese_sans_cle_ne_marque_pas_en_echec(store, monkeypatch):
+    from veille import synthesis
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(synthesis, "ouvrir", lambda local=False: store)
+    a = boamp.vers_avis(ligne_boamp(), DONNEES)
+    collect.integrer(store, a, True, PROFIL)
+    monkeypatch.setattr("sys.argv", ["synthesis"])
+    with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY"):
+        synthesis.main()
+    assert store.get(a.id)["synthese_statut"] == "demandee"
+
+
+def test_variables_github_vides(monkeypatch):
+    """GitHub transmet "" pour une variable non définie : les valeurs par défaut doivent s'appliquer."""
+    import importlib
+    from veille import synthesis
+    monkeypatch.setenv("CLAUDE_MODEL", "")
+    assert importlib.reload(synthesis).MODELE == "claude-sonnet-5-5"
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-5-5")
+    assert importlib.reload(synthesis).MODELE == "claude-opus-5-5"
+
+    envoyes = {}
+    class FauxSMTP:
+        def __init__(self, hote, port, timeout): envoyes.update(hote=hote, port=port)
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def login(self, u, p): pass
+        def sendmail(self, de, a, m): envoyes.update(de=de, a=a)
+    monkeypatch.setattr(digest.smtplib, "SMTP_SSL", FauxSMTP)
+    for v in ("SMTP_HOST", "SMTP_PORT", "RECAP_EXPEDITEUR"):
+        monkeypatch.setenv(v, "")
+    monkeypatch.setenv("SMTP_USER", "veille.adr@gmail.com"); monkeypatch.setenv("SMTP_PASSWORD", "x")
+    assert digest.envoyer([], {"sources": {}, "resultats": {}, "erreurs": []}, PROFIL, ["lea@adr.fr"])
+    assert envoyes == {"hote": "smtp.gmail.com", "port": 465, "de": "veille.adr@gmail.com", "a": ["lea@adr.fr"]}
+
+
+# --- appel Claude : sans outil imposé -----------------------------------------------
+
+class _Bloc:
+    def __init__(self, **k): self.__dict__.update(k)
+    def model_dump(self): return dict(self.__dict__)
+
+
+class _FauxClient:
+    def __init__(self, reponses): self.reponses, self.appels = list(reponses), []
+    @property
+    def messages(self): return self
+    def create(self, **k):
+        self.appels.append(k)
+        return _Bloc(content=self.reponses.pop(0))
+
+
+FICHE = {"resume": "ok", "points_majeurs": [], "estimation_cout": {"perimetre": "", "base": "", "fiabilite": "faible"},
+         "categorie_recommandee": "directe", "recommandation": "go", "justification": "ok"}
+
+
+def test_claude_outil_direct():
+    from veille import synthesis
+    c = _FauxClient([[_Bloc(type="thinking", thinking="…"), _Bloc(type="tool_use", name="fiche_ao", input=FICHE, id="t1")]])
+    assert synthesis.appeler_claude([{"type": "text", "text": "x"}], client=c) == FICHE
+    assert "tool_choice" not in c.appels[0]  # refusé par certains modèles
+
+
+def test_claude_relance_puis_outil():
+    from veille import synthesis
+    c = _FauxClient([[_Bloc(type="text", text="Voici mon analyse…")],
+                     [_Bloc(type="tool_use", name="fiche_ao", input=FICHE, id="t2")]])
+    assert synthesis.appeler_claude([{"type": "text", "text": "x"}], client=c) == FICHE
+    assert len(c.appels) == 2 and c.appels[1]["messages"][-1]["role"] == "user"
+
+
+def test_claude_json_dans_le_texte_et_echec():
+    import json as j
+    from veille import synthesis
+    c = _FauxClient([[_Bloc(type="text", text="```json\n" + j.dumps(FICHE) + "\n```")]])
+    assert synthesis.appeler_claude([], client=c) == FICHE
+    c = _FauxClient([[_Bloc(type="text", text="rien")], [_Bloc(type="text", text="toujours rien")]])
+    with pytest.raises(RuntimeError, match="après relance"):
+        synthesis.appeler_claude([], client=c)
+
+
+def test_normaliser_fiche_formes_variees():
+    import json as j
+    from veille.synthesis import normaliser_fiche
+    brute = {
+        "resume": "Agencement de l'accueil",
+        "points_majeurs": "- Lot 4 séparé\n- Visite obligatoire",
+        "visite": j.dumps({"obligatoire": "oui", "details": "10/11 à 9 h"}),
+        "estimation_cout": j.dumps({"montant_min_ht": "145 000 €", "montant_max_ht": 185000, "perimetre": "lot 4",
+                                    "base": "DPGF", "hypotheses": "9 ml\n220 m²", "fiabilite": "moyenne"}),
+        "lots": j.dumps([{"numero": "4", "intitule": "Menuiserie", "pertinence_adr": "forte"}, "Lot 6 électricité"]),
+        "criteres_attribution": ["Prix 40 %"],
+        "risques": {"texte": "pénalités"},
+        "recommandation": "Go",
+        "categorie_recommandee": "réponse directe",
+        "justification": "ok",
+    }
+    f = normaliser_fiche(j.dumps(brute))
+    assert f["points_majeurs"] == ["Lot 4 séparé", "Visite obligatoire"]
+    assert f["visite"] == {"obligatoire": True, "details": "10/11 à 9 h"}
+    e = f["estimation_cout"]
+    assert e["montant_min_ht"] == 145000 and e["montant_max_ht"] == 185000 and e["hypotheses"] == ["9 ml", "220 m²"]
+    assert f["lots"][0]["intitule"] == "Menuiserie" and f["lots"][1]["intitule"] == "Lot 6 électricité"
+    assert f["criteres_attribution"] == [{"critere": "Prix 40 %"}]
+    assert f["risques"] == ['{"texte": "pénalités"}']
+    assert f["recommandation"] == "go" and f["categorie_recommandee"] is None
+    assert normaliser_fiche({"resume": "x", "visite": "Non précisée", "estimation_cout": "Non chiffrable"})["visite"]["details"] == "Non précisée"
+    with pytest.raises(RuntimeError):
+        normaliser_fiche("pas du json")

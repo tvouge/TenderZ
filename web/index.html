@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tenders — L'Atelier du Renard</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M4 6l7 6h10l7-6-3 14-9 8-9-8z' fill='%23c2541b'/></svg>">
+</head>
+<body>
+  <header class="barre" id="barre" hidden>
+    <a class="marque" href="#/">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 6l7 6h10l7-6-3 14-9 8-9-8z"/></svg>
+      <span>Tenders <small>L'Atelier du Renard</small></span>
+    </a>
+    <nav>
+      <a href="#/" data-nav="liste">Appels d'offres</a>
+      <a href="#/bilan" data-nav="bilan">Bilan</a>
+      <a href="#/equipe" data-nav="equipe" id="nav-equipe" hidden>Équipe</a>
+      <a href="#/reglages" data-nav="reglages" id="nav-reglages" hidden>Réglages</a>
+    </nav>
+    <div class="actions-barre">
+      <a class="btn btn-secondaire" href="#/ajouter">+ Ajouter un AO</a>
+      <button id="utilisateur" class="btn-lien utilisateur" title="Changer mon mot de passe"></button>
+      <button class="btn-lien" id="deconnexion">Déconnexion</button>
+    </div>
+  </header>
+
+  <main id="app"><p class="chargement">Chargement…</p></main>
+
+  <dialog id="dialogue"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

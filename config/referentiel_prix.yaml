@@ -1,0 +1,30 @@
+# =====================================================================
+#  Référentiel de prix ADR — utilisé par l'IA pour l'estimation des coûts
+#
+#  À COMPLÉTER PAR L'ÉQUIPE avec les prix réellement pratiqués.
+#  Tant que ce fichier est vide, l'IA s'appuie sur le montant estimé
+#  de l'avis (s'il existe) et sur des ordres de grandeur généraux, et
+#  le signale par une fiabilité « faible ».
+#  Unité : euros HT, fourniture et pose sauf mention contraire.
+# =====================================================================
+
+taux_horaire_atelier: null       # ex. 55
+taux_horaire_pose: null          # ex. 50
+coefficient_frais_generaux: null # ex. 1.25
+marge_cible: null                # ex. 0.15
+
+ouvrages:
+  # nom: { unite: "ml|m²|u|forfait", prix_min: null, prix_max: null, note: "" }
+  banque_accueil:        { unite: "ml", prix_min: null, prix_max: null, note: "" }
+  habillage_mural_bois:  { unite: "m²", prix_min: null, prix_max: null, note: "" }
+  claustra_bois:         { unite: "m²", prix_min: null, prix_max: null, note: "" }
+  bloc_porte_bois:       { unite: "u",  prix_min: null, prix_max: null, note: "" }
+  placard_amenage:       { unite: "ml", prix_min: null, prix_max: null, note: "" }
+  bar_comptoir:          { unite: "ml", prix_min: null, prix_max: null, note: "" }
+  cuisine_sur_mesure:    { unite: "ml", prix_min: null, prix_max: null, note: "" }
+  stand_exposition:      { unite: "m²", prix_min: null, prix_max: null, note: "" }
+  mobilier_vitrine_musee: { unite: "u", prix_min: null, prix_max: null, note: "" }
+
+remarques: |
+  (Contraintes ou habitudes de chiffrage d'ADR : délais d'atelier,
+  sous-traitance de la finition laquée, zones d'intervention, etc.)
