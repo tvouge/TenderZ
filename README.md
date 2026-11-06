@@ -107,7 +107,7 @@ fonction Supabase qui garde le jeton GitHub côté serveur.
 2. **Supabase → Edge Functions → Deploy a new function → Via Editor** : nommez-la exactement `lancer-collecte`,
    collez le contenu de `supabase/functions/lancer-collecte/index.ts`, puis **Deploy** (laissez « Verify JWT » activé).
 3. **Supabase → Edge Functions → Secrets** : ajoutez `GITHUB_TOKEN` (le jeton) et `GITHUB_REPO`
-   (`Maximeperso0505/Tenders`).
+   (`tvouge/TenderZ`).
 
 Les boutons apparaissent dans **Bilan** (« Lancer maintenant », avec le suivi des exécutions) et en haut de la
 liste des AO. Une fois l'exécution terminée, la liste se recharge seule.

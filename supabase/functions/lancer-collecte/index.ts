@@ -6,7 +6,7 @@
 //
 // Secrets à définir (Supabase → Edge Functions → Secrets) :
 //   GITHUB_TOKEN   jeton GitHub « fine-grained », accès au seul dépôt, permission Actions : Read and write
-//   GITHUB_REPO    ex. Maximeperso0505/Tenders
+//   GITHUB_REPO    ex. tvouge/TenderZ
 //   GITHUB_BRANCH  facultatif, « main » par défaut
 //   CLE_PUBLIQUE   facultatif : la clé publishable, seulement si l'appel est_admin échoue
 // SUPABASE_URL et SUPABASE_ANON_KEY sont fournis automatiquement par Supabase.
