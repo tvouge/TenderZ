@@ -14,12 +14,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .analyse import Analyse, analyser, extraire_montant_texte, titre_court
+from .analyse import Analyse, a_faire, analyser, extraire_montant_texte, titre_court
 from .models import Avis
 from .util import contient, jours_restants, normaliser
 
 CATEGORIES = ("directe", "groupement", "sous_traitance", "non_pertinente")
-NOTATION_VERSION = 2   # à incrémenter quand les règles changent : les AO sont alors renotés
+NOTATION_VERSION = 3   # à incrémenter quand les règles changent : les AO sont alors renotés
 
 
 @dataclass
@@ -31,6 +31,7 @@ class Notation:
     montant: float | None = None
     titre_court: str = ""
     travaux: list[dict] = field(default_factory=list)
+    a_faire: list[str] = field(default_factory=list)
 
 
 def _points_cpv(cpvs: list[str], table: dict) -> tuple[int, str | None]:
@@ -152,6 +153,7 @@ def noter(avis: Avis, profil: dict, idf: bool) -> Notation:
     return Notation(
         score=score, categorie=categorie, detail=detail, idf=idf,
         montant=montant, titre_court=titre_court(avis.titre), travaux=a.travaux,
+        a_faire=a_faire(avis, profil),
     )
 
 

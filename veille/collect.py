@@ -108,6 +108,7 @@ def integrer(store: Store, avis: Avis, idf: bool, profil: dict) -> str:
         idf=idf,
         titre_court=note.titre_court,
         travaux=note.travaux,
+        a_faire=note.a_faire,
         montant_estime=note.montant,
         notation_v=NOTATION_VERSION,
         maj_veille_le=maintenant(),
@@ -186,7 +187,7 @@ def renoter(store: Store, profil: dict, tout: bool = False) -> int:
     for d in lignes:
         try:
             note = noter(avis_depuis_document(d), profil, bool(d.get("idf")))
-            maj = dict(titre_court=note.titre_court, travaux=note.travaux, montant_estime=note.montant,
+            maj = dict(titre_court=note.titre_court, travaux=note.travaux, a_faire=note.a_faire, montant_estime=note.montant,
                        notation_v=NOTATION_VERSION)
             if d.get("statut") == "a_qualifier":
                 maj.update(score=note.score, score_detail=note.detail)

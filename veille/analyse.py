@@ -96,6 +96,41 @@ def analyser(avis: Avis, profil: dict) -> Analyse:
     return a
 
 
+# --- Aperçu « ce qu'il y a à faire » -----------------------------------------
+
+_RE_COUPE = re.compile(r"[\n;•]+|(?<=[.!?])\s+(?=[A-ZÀ-Ý0-9])")
+
+
+def a_faire(avis: Avis, profil: dict, maxi: int = 5, long_max: int = 170) -> list[str]:
+    """Passages de l'avis qui décrivent des travaux de l'atelier (puis de la sous-traitance).
+
+    Extraction sans IA : on garde les phrases qui contiennent un mot du vocabulaire
+    « travaux » (config/profil_adr.yaml). La synthèse IA, quand elle existe, remplace cet aperçu.
+    """
+    voc = profil.get("travaux")
+    if not voc or not avis.description:
+        return []
+    mots_adr = [m for g in voc["adr"] for m in g["mots"]]
+    mots_ss = [m for g in voc["sous_traite"] for m in g["mots"]]
+    adr: list[str] = []
+    ss: list[str] = []
+    vus: set[str] = set()
+    for brut in _RE_COUPE.split(avis.description):
+        phrase = re.sub(r"\s+", " ", brut).strip(" -–—:,")
+        norm = normaliser(phrase)
+        if len(phrase) < 12 or norm in vus:
+            continue
+        vus.add(norm)
+        if len(phrase) > long_max:
+            phrase = phrase[: long_max - 1].rsplit(" ", 1)[0].rstrip(",;:- ") + "…"
+        phrase = phrase[:1].upper() + phrase[1:]
+        if any(contient(norm, m) for m in mots_adr):
+            adr.append(phrase)
+        elif any(contient(norm, m) for m in mots_ss):
+            ss.append("À confier à un sous-traitant : " + phrase[:1].lower() + phrase[1:])
+    return (adr + ss)[:maxi]
+
+
 # --- Titre court ------------------------------------------------------------
 
 _PREFIXES = [

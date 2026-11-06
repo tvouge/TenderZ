@@ -13,7 +13,7 @@ const COLONNES_BASE = "id,source,ref,titre,url,acheteur,nature,type_marche,proce
   "documents,synthese,synthese_statut,synthese_le,synthese_pieces,synthese_erreur,visite_obligatoire,nouveaute,modifie,avis_annule," +
   "rectificatifs,autres_sources,detecte_le,maj_veille_le,maj_par,maj_le";
 // Colonnes ajoutées par supabase/003_travaux.sql (la liste fonctionne aussi tant qu'elles n'existent pas)
-const COLONNES_NOUVELLES = ",titre_court,travaux,montant_estime";
+const COLONNES_NOUVELLES = ",titre_court,travaux,montant_estime,a_faire";
 const maintenantISO = () => new Date().toISOString();
 
 // --- Référentiels -----------------------------------------------------------
@@ -77,6 +77,7 @@ const etat = {
   aosCharges: false,
   desabonnements: [],
   filtres: lireFiltres(),
+  ouverts: new Set(), // aperçus « à faire » dépliés dans la liste
 };
 
 function lireFiltres() {
@@ -432,14 +433,53 @@ const ICONES = {
 };
 const SENS_ETIQUETTE = { adr: "Dans le métier de l'atelier", ss: "À confier à un sous-traitant", hors: "Hors métier" };
 
+const montantCourt = (m) => (m >= 1e6 ? `${(m / 1e6).toFixed(1).replace(".", ",")} M€` : `${Math.round(m / 1000).toLocaleString("fr-FR")} k€`);
+const classeBudget = (m) => (m >= BUDGET_IDEAL[0] && m <= BUDGET_IDEAL[1] ? "ideal" : m > BUDGET_IDEAL[1] && m <= BUDGET_MAX ? "haut" : "hors");
+
 function budgetHtml(a) {
   if (!Object.hasOwn(a, "montant_estime")) return ""; // colonne pas encore créée
   const m = Number(a.montant_estime);
   if (!m) return `<span class="m m-budget inconnu" title="Aucun montant dans l'avis : à vérifier dans le DCE">${ICONES.budget}Budget non communiqué</span>`;
-  const txt = m >= 1e6 ? `${(m / 1e6).toFixed(1).replace(".", ",")} M€` : `${Math.round(m / 1000).toLocaleString("fr-FR")} k€`;
-  const cl = m >= BUDGET_IDEAL[0] && m <= BUDGET_IDEAL[1] ? "ideal" : m > BUDGET_IDEAL[1] && m <= BUDGET_MAX ? "haut" : "hors";
+  const txt = montantCourt(m);
+  const cl = classeBudget(m);
   const aide = { ideal: "Dans la cible (100 – 500 k€)", haut: "Au-dessus de la cible, encore jouable", hors: "En dehors de la fourchette visée" }[cl];
   return `<span class="m m-budget ${cl}" title="${aide}">${ICONES.budget}≈ ${txt} HT</span>`;
+}
+
+const tronquer = (t, n = 220) => (String(t).length > n ? String(t).slice(0, n - 1).replace(/\s+\S*$/, "") + "…" : String(t));
+
+// Ce qu'il y a à faire dans l'AO : synthèse IA si elle existe, sinon extraits de l'avis, sinon étiquettes
+function pointsAFaire(a) {
+  const s = a.synthese;
+  let pts = [], source = "";
+  if (s) {
+    (s.lots || []).filter((l) => ["forte", "moyenne"].includes(l.pertinence_adr)).slice(0, 4)
+      .forEach((l) => pts.push(`${l.numero ? `Lot ${l.numero} : ` : ""}${l.intitule}${l.commentaire ? ` — ${l.commentaire}` : ""}`));
+    (s.exigences_techniques || []).slice(0, 3).forEach((x) => pts.push(x));
+    if (!pts.length) (s.points_majeurs || []).slice(0, 4).forEach((x) => pts.push(x));
+    if (s.planning) pts.push(`Délais : ${s.planning}`);
+    source = `Synthèse IA du ${fmtDate(a.synthese_le, false)}`;
+  } else if ((a.a_faire || []).length) {
+    pts = [...a.a_faire];
+    source = "Extrait automatiquement de l'avis";
+  } else {
+    const par = (t) => (a.travaux || []).filter((x) => x.t === t).map((x) => x.n);
+    if (par("adr").length) pts.push(`À faire par l'atelier : ${par("adr").join(", ")}`);
+    if (par("ss").length) pts.push(`À confier à un sous-traitant : ${par("ss").join(", ")}`);
+    if (par("hors").length) pts.push(`Hors métier, à ne pas chiffrer : ${par("hors").join(", ")}`);
+    source = "Déduit du titre de l'avis";
+  }
+  if (s?.visite?.obligatoire || a.visite_obligatoire) pts.push("Visite obligatoire avant de répondre");
+  return { pts: pts.slice(0, 7).map((p) => tronquer(p)), source };
+}
+
+function apercuHtml(a, ouvert) {
+  const { pts, source } = pointsAFaire(a);
+  return `<div class="ao-apercu" id="ap-${esc(a.id)}" ${ouvert ? "" : "hidden"}>
+    ${pts.length ? `<ul>${pts.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
+      : `<p class="aide">Pas encore de détail sur cet appel d'offres : ouvrez la fiche et lancez la synthèse.</p>`}
+    <div class="apercu-pied"><span class="aide">${esc(source)}</span><a href="#/ao/${encodeURIComponent(a.id)}">Ouvrir la fiche complète</a></div>
+  </div>`;
 }
 
 function carteAO(a, dansManques) {
@@ -450,24 +490,27 @@ function carteAO(a, dansManques) {
   const etiquettes = (a.travaux || []).map((t) => `<span class="etiq e-${esc(t.t)}" title="${esc(SENS_ETIQUETTE[t.t] || "")}">${esc(t.n)}</span>`).join("");
   const lieu = libelleLieu(a.lieu);
   const jours = u === "expiree" ? "Clos" : j === null ? "Date ?" : `J-${j}`;
+  const ouvert = etat.ouverts.has(a.id);
   const statut = a.statut === "a_qualifier" && dansManques ? "Non traité" : (STATUTS[a.statut] || a.statut);
-  return `<article class="ao n-${niveau} u-${u}" data-id="${esc(a.id)}" tabindex="0" role="link" aria-label="${esc(titreCourt(a))}">
+  return `<article class="ao n-${niveau} u-${u}" data-id="${esc(a.id)}">
     ${anneau}
     <div class="ao-corps">
       <div class="ao-haut"><span class="ao-cat c-${esc(a.categorie)}">${esc(CATEGORIES[a.categorie] || a.categorie)}</span>${badges(a)}</div>
-      <div class="ao-titre" title="${esc(a.titre)}">${esc(titreCourt(a))}</div>
+      <div class="ao-titre" title="${esc(a.titre)}"><a href="#/ao/${encodeURIComponent(a.id)}">${esc(titreCourt(a))}</a></div>
       ${etiquettes ? `<div class="ao-etiq">${etiquettes}</div>` : ""}
       <div class="ao-meta">
         ${lieu ? `<span class="m">${ICONES.lieu}${esc(lieu)}</span>` : ""}
         ${a.acheteur ? `<span class="m">${ICONES.acheteur}${esc(a.acheteur)}</span>` : ""}
         ${budgetHtml(a)}
       </div>
+      <button type="button" class="ao-deplier" data-ap="${esc(a.id)}" aria-expanded="${ouvert}" aria-controls="ap-${esc(a.id)}"><span class="fleche" aria-hidden="true"></span><span class="lib-deplier">${ouvert ? "Masquer le détail" : "Voir ce qu'il y a à faire"}</span></button>
     </div>
     <div class="ao-echeance">
       <div class="jours">${jours}</div>
       <div class="date">${esc(dateCourte(a.date_limite))}</div>
       <div class="ao-statut">${esc(statut)}${a.responsable ? `<br>${nomCourt(a.responsable)}` : ""}</div>
     </div>
+    ${apercuHtml(a, ouvert)}
   </article>`;
 }
 
@@ -489,19 +532,20 @@ function htmlTableau(liste, grouper) {
     if (grouper && a.categorie !== catPrec) {
       catPrec = a.categorie;
       const n = liste.filter((x) => x.categorie === a.categorie).length;
-      lignes += `<tr class="groupe-cat"><td colspan="6">${esc(CATEGORIES[a.categorie] || a.categorie)} · ${n}</td></tr>`;
+      lignes += `<tr class="groupe-cat"><td colspan="7">${esc(CATEGORIES[a.categorie] || a.categorie)} · ${n}</td></tr>`;
     }
     lignes += `<tr data-id="${esc(a.id)}">
       <td>${pastilleUrgence(a)}<div class="sous">${fmtDate(a.date_limite, false)}</div></td>
       <td>${pastilleScore(a.score)}</td>
       <td><div class="titre-ao" title="${esc(a.titre)}">${esc(titreCourt(a))}</div><div class="sous">${esc(a.acheteur)}${grouper ? "" : ` · ${esc(CATEGORIES[a.categorie] || a.categorie)}`}</div>${badges(a)}</td>
       <td class="masquer-mobile">${esc(libelleLieu(a.lieu))}</td>
+      <td class="budget-col">${Number(a.montant_estime) ? `<span class="m-budget ${classeBudget(Number(a.montant_estime))}">≈ ${montantCourt(Number(a.montant_estime))} HT</span>` : `<span class="sous">non communiqué</span>`}</td>
       <td>${esc(STATUTS[a.statut] || a.statut)}${a.responsable ? `<div class="sous">${nomCourt(a.responsable)}</div>` : ""}</td>
       <td class="masquer-mobile sous">${esc((a.source || "").toUpperCase())}<br>${fmtDate(a.date_publication, false)}</td>
     </tr>`;
   }
   return `<div class="tableau"><table>
-      <thead><tr><th>Échéance</th><th>Score</th><th>Objet</th><th class="masquer-mobile">Lieu</th><th>Statut</th><th class="masquer-mobile">Source</th></tr></thead>
+      <thead><tr><th>Échéance</th><th>Score</th><th>Objet</th><th class="masquer-mobile">Lieu</th><th>Budget estimé</th><th>Statut</th><th class="masquer-mobile">Source</th></tr></thead>
       <tbody>${lignes}</tbody></table></div>`;
 }
 
@@ -532,7 +576,10 @@ function vueListe() {
   const parEcheance = (a, b) => ORDRE_URG[urgence(a)[0]] - ORDRE_URG[urgence(b)[0]]
     || (versDate(a.date_limite) || Infinity) - (versDate(b.date_limite) || Infinity);
   const parCategorie = (a, b) => (ORDRE_CAT[a.categorie] ?? 9) - (ORDRE_CAT[b.categorie] ?? 9);
+  const dateRecente = (a) => versDate(a.date_publication) || versDate(a.detecte_le) || new Date(0);
+  const parRecents = (a, b) => dateRecente(b) - dateRecente(a);
   const tri = { pertinence: (a, b) => parScore(a, b) || parEcheance(a, b),
+                recents: (a, b) => parRecents(a, b) || parScore(a, b),
                 echeance: (a, b) => parEcheance(a, b) || parScore(a, b),
                 categorie: (a, b) => parCategorie(a, b) || parEcheance(a, b) || parScore(a, b) }[f.tri] || ((a, b) => parScore(a, b));
   const liste = filtrer(tous, f).sort(tri);
@@ -568,11 +615,6 @@ function vueListe() {
         <option value="${SEUIL_PERTINENT}" ${f.scoreMin === String(SEUIL_PERTINENT) ? "selected" : ""}>Score ≥ ${SEUIL_PERTINENT}</option>
         <option value="" ${!f.scoreMin ? "selected" : ""}>Tous les scores</option>
       </select>
-      <select id="f-tri" title="Trier par">
-        <option value="pertinence" ${f.tri === "pertinence" ? "selected" : ""}>Trier : pertinence</option>
-        <option value="echeance" ${f.tri === "echeance" ? "selected" : ""}>Trier : échéance</option>
-        <option value="categorie" ${f.tri === "categorie" ? "selected" : ""}>Trier : type de réponse</option>
-      </select>
       <label class="case"><input type="checkbox" id="f-miens" ${f.miens ? "checked" : ""}> Mes dossiers</label>
       <div class="bascule" role="group" aria-label="Affichage">
         <button data-vue="cartes" class="${f.vue !== "tableau" ? "actif" : ""}">Cartes</button><button data-vue="tableau" class="${f.vue === "tableau" ? "actif" : ""}">Tableau</button>
@@ -583,7 +625,14 @@ function vueListe() {
     ${f.vue !== "tableau" ? legendeEtiquettes() : ""}
     ${masques > 0 ? `<p class="aide" style="margin:-6px 0 12px">${liste.length} AO affichés · ${masques} sous le score minimum masqués
       (<button class="btn-lien" id="voir-tous-scores">tout afficher</button>)</p>` : ""}
-    ${noteOnglet}${corps}`;
+    ${noteOnglet}
+    <div class="barre-tri" role="group" aria-label="Trier la liste">
+      <span class="lib-tri">Trier par</span>
+      ${[["pertinence", "Pertinence"], ["echeance", "Date limite"], ["recents", "Plus récents"], ["categorie", "Type de réponse"]]
+        .map(([k, l]) => `<button type="button" data-tri="${k}" class="${f.tri === k ? "actif" : ""}" aria-pressed="${f.tri === k}">${l}</button>`).join("")}
+      <span class="nb-ao">${liste.length} appel${liste.length > 1 ? "s" : ""} d'offres</span>
+    </div>
+    ${corps}`;
 
   if (f.categorie === "") $("#f-cat").value = "";
   $$("[data-onglet]").forEach((b) => (b.onclick = () => { f.onglet = b.dataset.onglet; sauverFiltres(); vueListe(); }));
@@ -592,14 +641,21 @@ function vueListe() {
   $("#f-urg").onchange = (e) => { f.urgence = e.target.value; sauverFiltres(); vueListe(); };
   $("#f-miens").onchange = (e) => { f.miens = e.target.checked; sauverFiltres(); vueListe(); };
   $("#f-score").onchange = (e) => { f.scoreMin = e.target.value; sauverFiltres(); vueListe(); };
-  $("#f-tri").onchange = (e) => { f.tri = e.target.value; sauverFiltres(); vueListe(); };
+  $$("[data-tri]").forEach((b) => (b.onclick = () => { f.tri = b.dataset.tri; sauverFiltres(); vueListe(); }));
+  $$(".ao-deplier").forEach((b) => (b.onclick = (e) => {
+    e.stopPropagation();
+    const id = b.dataset.ap, ouvre = b.getAttribute("aria-expanded") !== "true";
+    ouvre ? etat.ouverts.add(id) : etat.ouverts.delete(id);
+    b.setAttribute("aria-expanded", String(ouvre));
+    b.querySelector(".lib-deplier").textContent = ouvre ? "Masquer le détail" : "Voir ce qu'il y a à faire";
+    b.closest(".ao").querySelector(".ao-apercu").hidden = !ouvre;
+  }));
   $("#voir-tous-scores") && ($("#voir-tous-scores").onclick = () => { f.scoreMin = ""; sauverFiltres(); vueListe(); });
   $("#lancer-collecte-liste") && ($("#lancer-collecte-liste").onclick = () => lancerWorkflow("collecte"));
   $$("[data-vue]").forEach((b) => (b.onclick = () => { f.vue = b.dataset.vue; sauverFiltres(); vueListe(); }));
   $$("tbody tr[data-id], .ao[data-id]").forEach((el) => {
     const ouvrir = () => (location.hash = `#/ao/${encodeURIComponent(el.dataset.id)}`);
-    el.onclick = ouvrir;
-    el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); ouvrir(); } };
+    el.onclick = (e) => { if (!e.target.closest("a, button")) ouvrir(); };
   });
   if (focus === "f-texte") { const i = $("#f-texte"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
 }

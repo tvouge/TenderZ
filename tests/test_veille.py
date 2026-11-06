@@ -471,3 +471,16 @@ def test_renotage_des_anciennes_regles(store):
     assert store.get(pris.id)["score"] == 3          # dossier déjà pris : score conservé
     assert store.get(pris.id)["travaux"]             # mais étiquettes ajoutées
     assert collect.renoter(store, PROFIL) == 0       # rien à refaire
+
+
+def test_apercu_a_faire_extrait_de_l_avis():
+    from veille.analyse import a_faire
+    texte = ("Lot 4 : menuiseries intérieures bois, habillages muraux et banque d'accueil. "
+             "Fourniture de la serrurerie des issues de secours.\nPlâtrerie et peinture des circulations. "
+             "Le candidat remet son offre sur la plateforme.")
+    pts = a_faire(avis_test("Rénovation d'un collège", texte, cpv=()), PROFIL)
+    assert pts[0].startswith("Lot 4") and "banque d'accueil" in pts[0]
+    assert any(p.startswith("À confier à un sous-traitant") and "serrurerie" in p for p in pts)
+    assert not any("plateforme" in p or "Plâtrerie" in p for p in pts)
+    assert a_faire(avis_test("x", ""), PROFIL) == []
+    assert len(a_faire(avis_test("x", "Menuiserie bois. " * 40 + "Portes palières."), PROFIL, maxi=3)) <= 3

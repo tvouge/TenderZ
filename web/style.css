@@ -277,3 +277,37 @@ dialog select, dialog input { width: 100%; }
   .ao-echeance .ao-statut { margin-left: auto; text-align: right; }
 }
 @media (prefers-reduced-motion: reduce) { .ao, .ao::after { transition: none; } }
+
+/* --- tri, aperçu « à faire », colonne budget --------------------------- */
+.barre-tri { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; }
+.barre-tri .lib-tri { color: var(--doux); font-size: .85rem; margin-right: 4px; }
+.barre-tri button { background: var(--carte); border: 1px solid var(--ligne); border-radius: 999px; padding: 6px 14px; font: inherit; font-size: .85rem; font-weight: 600; color: var(--doux); cursor: pointer; }
+.barre-tri button:hover { background: var(--gris-pale); color: var(--texte); }
+.barre-tri button.actif { background: var(--texte); border-color: var(--texte); color: #fff; }
+.barre-tri .nb-ao { margin-left: auto; color: var(--doux); font-size: .85rem; }
+
+.ao-titre a { color: inherit; text-decoration: none; }
+.ao-titre a:hover { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+.ao:focus-within { border-color: var(--accent); }
+
+.ao-deplier { display: inline-flex; align-items: center; gap: 8px; margin: 10px 0 0 -8px; padding: 5px 8px; background: none; border: none; border-radius: 6px; font: inherit; font-size: .85rem; font-weight: 600; color: var(--accent-fonce); cursor: pointer; }
+.ao-deplier:hover { background: var(--accent-pale); }
+.ao-deplier .fleche { width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg) translate(-2px, -2px); transition: transform .15s; }
+.ao-deplier[aria-expanded="true"] .fleche { transform: rotate(-135deg) translate(-2px, -2px); }
+
+.ao-apercu { grid-column: 1 / -1; margin: -8px -38px -4px -6px; padding: 14px 38px 6px 78px; border-top: 1px dashed var(--ligne); }
+.ao-apercu ul { margin: 0 0 10px; padding-left: 18px; max-width: 90ch; }
+.ao-apercu li { margin: 5px 0; line-height: 1.45; }
+.ao-apercu li::marker { color: var(--accent); }
+.apercu-pied { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: .85rem; }
+.apercu-pied .aide { margin: 0; }
+.apercu-pied a { color: var(--accent-fonce); font-weight: 600; }
+
+.budget-col { white-space: nowrap; }
+.m-budget.ideal { color: var(--ok); font-weight: 600; }
+.m-budget.hors { color: var(--urgente); }
+
+@media (max-width: 900px) {
+  .barre-tri .nb-ao { margin-left: 0; width: 100%; }
+  .ao-apercu { margin: 0 -32px 0 -4px; padding: 12px 32px 4px 20px; }
+}
