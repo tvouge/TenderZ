@@ -8,10 +8,12 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 const BUCKET = "dce";
 // Colonnes chargées pour la liste (le texte intégral de l'avis reste côté serveur)
-const COLONNES = "id,source,ref,titre,url,acheteur,nature,type_marche,procedure,lieu,cpv,date_publication,date_limite,titulaire,portail," +
+const COLONNES_BASE = "id,source,ref,titre,url,acheteur,nature,type_marche,procedure,lieu,cpv,date_publication,date_limite,titulaire,portail," +
   "score,score_detail,categorie,categorie_corrigee,categorie_ia,statut,responsable,motif_abandon,commentaire_abandon,notes,montant_depose," +
   "documents,synthese,synthese_statut,synthese_le,synthese_pieces,synthese_erreur,visite_obligatoire,nouveaute,modifie,avis_annule," +
   "rectificatifs,autres_sources,detecte_le,maj_veille_le,maj_par,maj_le";
+// Colonnes ajoutées par supabase/003_travaux.sql (la liste fonctionne aussi tant qu'elles n'existent pas)
+const COLONNES_NOUVELLES = ",titre_court,travaux,montant_estime";
 const maintenantISO = () => new Date().toISOString();
 
 // --- Référentiels -----------------------------------------------------------
@@ -31,6 +33,7 @@ const ONGLETS = [
   ["depose", "Déposés", ["depose"]],
   ["clos", "Gagnés / perdus", ["gagne", "perdu"]],
   ["abandonne", "Abandonnés", ["abandonne"]],
+  ["manques", "Faute de ressources", []], // règle propre : voir estManque()
   ["tous", "Tous", Object.keys(STATUTS)],
 ];
 const CATEGORIES = {
@@ -60,6 +63,10 @@ const SEUIL_CRITIQUE = 10, SEUIL_URGENT = 21;
 // Seuils de score : à garder identiques à config/profil_adr.yaml (rubrique « seuils »)
 const SEUIL_SYNTHESE = 65; // synthèse IA de l'avis lancée automatiquement
 const SEUIL_PERTINENT = 40; // en dessous : « peu pertinent »
+// Un AO non commencé à moins de 7 jours de l'échéance n'est plus traitable : il passe dans « Faute de ressources »
+const DELAI_MIN_REPONSE = 7;
+// Budget visé : à garder identique à config/profil_adr.yaml (rubrique « notation »)
+const BUDGET_IDEAL = [100000, 500000], BUDGET_MAX = 1000000;
 
 // --- État -----------------------------------------------------------------
 
@@ -73,7 +80,7 @@ const etat = {
 };
 
 function lireFiltres() {
-  const defaut = { onglet: "a_qualifier", categorie: "", urgence: "", texte: "", miens: false, tri: "pertinence", scoreMin: String(SEUIL_PERTINENT) };
+  const defaut = { onglet: "a_qualifier", categorie: "", urgence: "", texte: "", miens: false, tri: "pertinence", scoreMin: String(SEUIL_PERTINENT), vue: "cartes" };
   try { return { ...defaut, ...JSON.parse(localStorage.getItem("veille-filtres") || "{}") }; }
   catch { return defaut; }
 }
@@ -146,6 +153,15 @@ const pastilleSynthese = (ao) => {
     : "";
   return `<span class="pastille ${e[0]}"${aide}>${libelle}</span>`;
 };
+
+function legendeEtiquettes() {
+  return `<div class="legende">
+    <span><span class="etiq e-adr">Portes</span> notre métier</span>
+    <span><span class="etiq e-ss">Métallerie</span> à sous-traiter</span>
+    <span><span class="etiq e-hors">Peinture</span> hors métier</span>
+    <span>Survolez le score pour voir comment il est calculé</span>
+  </div>`;
+}
 
 function legendeScores() {
   return `<div class="legende">
@@ -289,11 +305,18 @@ $("#utilisateur").onclick = () => etat.utilisateur && dialogueMotDePasse();
 
 // --- Données temps réel -----------------------------------------------------------
 
+let avecNouvellesColonnes = true;
+
 async function chargerAOs() {
   const depuis = new Date(Date.now() - 400 * 86400000).toISOString();
+  const requete = (colonnes, de) => sb.from("aos").select(colonnes).gte("maj_veille_le", depuis)
+    .order("maj_veille_le", { ascending: false }).range(de, de + 999);
   for (let de = 0; de < 6000; de += 1000) {
-    const { data, error } = await sb.from("aos").select(COLONNES).gte("maj_veille_le", depuis)
-      .order("maj_veille_le", { ascending: false }).range(de, de + 999);
+    let { data, error } = await requete(avecNouvellesColonnes ? COLONNES_BASE + COLONNES_NOUVELLES : COLONNES_BASE, de);
+    if (error && avecNouvellesColonnes && error.code === "42703") { // colonne inconnue : migration 003 pas encore lancée
+      avecNouvellesColonnes = false;
+      ({ data, error } = await requete(COLONNES_BASE, de));
+    }
     if (error) throw error;
     data.forEach((a) => etat.aos.set(a.id, a));
     if (data.length < 1000) break;
@@ -361,19 +384,141 @@ function router() {
 
 // --- Liste ------------------------------------------------------------------------
 
+// --- Délai, titres et étiquettes -------------------------------------------------------
+
+function delaiTropCourt(a) {
+  const j = joursRestants(a.date_limite);
+  return j !== null && j < DELAI_MIN_REPONSE;
+}
+// Non commencé et trop tard (ou dépassé), ou abandonné faute de temps / de charge
+const estManque = (a) => (a.statut === "a_qualifier" && delaiTropCourt(a))
+  || (a.statut === "abandonne" && ["charge_atelier", "delai_insuffisant"].includes(a.motif_abandon));
+
+const ACRONYMES = new Set(["ZAC", "PLV", "ERP", "DCE", "CPAM", "IUT", "IDF", "HLM", "TCE", "RATP", "SNCF", "CHU", "PMR", "ESAT", "CFA", "EHPAD", "CCAS", "OPH"]);
+// Repli côté navigateur tant que le titre court n'est pas calculé par la collecte
+function titreCourt(a) {
+  if (a.titre_court) return a.titre_court;
+  let t = String(a.titre || "").replace(/\s+/g, " ").trim().replace(/[.;:,]+$/, "");
+  const lettres = t.replace(/[^A-Za-zÀ-ÿ]/g, "");
+  if (lettres && (lettres.match(/[A-ZÀ-Þ]/g) || []).length / lettres.length > 0.6) {
+    t = t.split(" ").map((m) => (ACRONYMES.has(m.replace(/[.,()]/g, "")) ? m : m.toLowerCase())).join(" ");
+  }
+  const avant = t;
+  t = t.replace(/^march[ée]s?\s+(public\s+)?(de\s+|d')?(travaux|fournitures?|services?)\s*(pour|relatifs?\s+[àa]|:|-)?\s*/i, "")
+    .replace(/^accords?[- ]cadres?\s*(pour|relatif\s+[àa]|:|-)?\s*/i, "")
+    .replace(/^travaux\s+(de\s+|d['’]|pour\s+)/i, "").trim();
+  if (t.length < 8) t = avant;
+  t = t.charAt(0).toUpperCase() + t.slice(1);
+  return t.length > 90 ? t.slice(0, 89).replace(/\s+\S*$/, "") + "…" : t;
+}
+
+const DEPARTEMENTS = { 75: "Paris", 77: "Seine-et-Marne", 78: "Yvelines", 91: "Essonne", 92: "Hauts-de-Seine", 93: "Seine-Saint-Denis", 94: "Val-de-Marne", 95: "Val-d'Oise",
+  FR101: "Paris", FR102: "Seine-et-Marne", FR103: "Yvelines", FR104: "Essonne", FR105: "Hauts-de-Seine", FR106: "Seine-Saint-Denis", FR107: "Val-de-Marne", FR108: "Val-d'Oise" };
+function libelleLieu(lieu) {
+  const morceaux = String(lieu || "").split(",").map((x) => x.trim()).filter(Boolean);
+  if (!morceaux.length) return "";
+  return morceaux.map((c) => DEPARTEMENTS[c.toUpperCase()] || (/^\d{2,3}$/.test(c) ? `Dép. ${c}` : c)).join(", ");
+}
+
+const dateCourte = (v) => {
+  const d = versDate(v);
+  return d ? d.toLocaleDateString("fr-FR", { timeZone: "Europe/Paris", weekday: "short", day: "numeric", month: "short" }) : "";
+};
+
+const ICONES = {
+  lieu: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 14s4.5-4.2 4.5-7.5a4.5 4.5 0 1 0-9 0C3.5 9.8 8 14 8 14Z"/><circle cx="8" cy="6.5" r="1.6"/></svg>',
+  acheteur: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 14V3.5h7V14M9.5 7h4V14M5 6h2M5 9h2M5 12h2"/></svg>',
+  budget: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.5 4.2A4.3 4.3 0 1 0 11.5 11.8M3 6.8h6M3 9.2h6"/></svg>',
+};
+const SENS_ETIQUETTE = { adr: "Dans le métier de l'atelier", ss: "À confier à un sous-traitant", hors: "Hors métier" };
+
+function budgetHtml(a) {
+  if (!Object.hasOwn(a, "montant_estime")) return ""; // colonne pas encore créée
+  const m = Number(a.montant_estime);
+  if (!m) return `<span class="m m-budget inconnu" title="Aucun montant dans l'avis : à vérifier dans le DCE">${ICONES.budget}Budget non communiqué</span>`;
+  const txt = m >= 1e6 ? `${(m / 1e6).toFixed(1).replace(".", ",")} M€` : `${Math.round(m / 1000).toLocaleString("fr-FR")} k€`;
+  const cl = m >= BUDGET_IDEAL[0] && m <= BUDGET_IDEAL[1] ? "ideal" : m > BUDGET_IDEAL[1] && m <= BUDGET_MAX ? "haut" : "hors";
+  const aide = { ideal: "Dans la cible (100 – 500 k€)", haut: "Au-dessus de la cible, encore jouable", hors: "En dehors de la fourchette visée" }[cl];
+  return `<span class="m m-budget ${cl}" title="${aide}">${ICONES.budget}≈ ${txt} HT</span>`;
+}
+
+function carteAO(a, dansManques) {
+  const [u, j] = urgence(a);
+  const niveau = a.score === null || a.score === undefined ? "manuel" : a.score >= SEUIL_SYNTHESE ? "haut" : a.score >= SEUIL_PERTINENT ? "moyen" : "bas";
+  const anneau = niveau === "manuel" ? `<div class="anneau manuel" title="Ajout manuel : pas de score"><b>+</b></div>`
+    : `<div class="anneau" style="--p:${Math.max(0, Math.min(100, a.score))}" title="${esc((a.score_detail || []).join("\n") || "Score de pertinence")}"><b>${esc(a.score)}</b></div>`;
+  const etiquettes = (a.travaux || []).map((t) => `<span class="etiq e-${esc(t.t)}" title="${esc(SENS_ETIQUETTE[t.t] || "")}">${esc(t.n)}</span>`).join("");
+  const lieu = libelleLieu(a.lieu);
+  const jours = u === "expiree" ? "Clos" : j === null ? "Date ?" : `J-${j}`;
+  const statut = a.statut === "a_qualifier" && dansManques ? "Non traité" : (STATUTS[a.statut] || a.statut);
+  return `<article class="ao n-${niveau} u-${u}" data-id="${esc(a.id)}" tabindex="0" role="link" aria-label="${esc(titreCourt(a))}">
+    ${anneau}
+    <div class="ao-corps">
+      <div class="ao-haut"><span class="ao-cat c-${esc(a.categorie)}">${esc(CATEGORIES[a.categorie] || a.categorie)}</span>${badges(a)}</div>
+      <div class="ao-titre" title="${esc(a.titre)}">${esc(titreCourt(a))}</div>
+      ${etiquettes ? `<div class="ao-etiq">${etiquettes}</div>` : ""}
+      <div class="ao-meta">
+        ${lieu ? `<span class="m">${ICONES.lieu}${esc(lieu)}</span>` : ""}
+        ${a.acheteur ? `<span class="m">${ICONES.acheteur}${esc(a.acheteur)}</span>` : ""}
+        ${budgetHtml(a)}
+      </div>
+    </div>
+    <div class="ao-echeance">
+      <div class="jours">${jours}</div>
+      <div class="date">${esc(dateCourte(a.date_limite))}</div>
+      <div class="ao-statut">${esc(statut)}${a.responsable ? `<br>${nomCourt(a.responsable)}` : ""}</div>
+    </div>
+  </article>`;
+}
+
+function htmlCartes(liste, grouper, dansManques) {
+  let html = "", catPrec = null;
+  for (const a of liste) {
+    if (grouper && a.categorie !== catPrec) {
+      catPrec = a.categorie;
+      html += `<div class="groupe-ao">${esc(CATEGORIES[a.categorie] || a.categorie)} · ${liste.filter((x) => x.categorie === a.categorie).length}</div>`;
+    }
+    html += carteAO(a, dansManques);
+  }
+  return `<div class="liste-ao">${html}</div>`;
+}
+
+function htmlTableau(liste, grouper) {
+  let lignes = "", catPrec = null;
+  for (const a of liste) {
+    if (grouper && a.categorie !== catPrec) {
+      catPrec = a.categorie;
+      const n = liste.filter((x) => x.categorie === a.categorie).length;
+      lignes += `<tr class="groupe-cat"><td colspan="6">${esc(CATEGORIES[a.categorie] || a.categorie)} · ${n}</td></tr>`;
+    }
+    lignes += `<tr data-id="${esc(a.id)}">
+      <td>${pastilleUrgence(a)}<div class="sous">${fmtDate(a.date_limite, false)}</div></td>
+      <td>${pastilleScore(a.score)}</td>
+      <td><div class="titre-ao" title="${esc(a.titre)}">${esc(titreCourt(a))}</div><div class="sous">${esc(a.acheteur)}${grouper ? "" : ` · ${esc(CATEGORIES[a.categorie] || a.categorie)}`}</div>${badges(a)}</td>
+      <td class="masquer-mobile">${esc(libelleLieu(a.lieu))}</td>
+      <td>${esc(STATUTS[a.statut] || a.statut)}${a.responsable ? `<div class="sous">${nomCourt(a.responsable)}</div>` : ""}</td>
+      <td class="masquer-mobile sous">${esc((a.source || "").toUpperCase())}<br>${fmtDate(a.date_publication, false)}</td>
+    </tr>`;
+  }
+  return `<div class="tableau"><table>
+      <thead><tr><th>Échéance</th><th>Score</th><th>Objet</th><th class="masquer-mobile">Lieu</th><th>Statut</th><th class="masquer-mobile">Source</th></tr></thead>
+      <tbody>${lignes}</tbody></table></div>`;
+}
+
 function filtrer(aos, f) {
   const onglet = ONGLETS.find((o) => o[0] === f.onglet) || ONGLETS[0];
   const texte = f.texte.trim().toLowerCase();
   return aos.filter((a) => {
-    if (!onglet[2].includes(a.statut)) return false;
+    if (f.onglet === "manques") { if (!estManque(a)) return false; }
+    else if (!onglet[2].includes(a.statut)) return false;
+    // Non commencé et trop proche de l'échéance : rangé dans « Faute de ressources »
+    else if (f.onglet === "a_qualifier" && delaiTropCourt(a)) return false;
     if (f.categorie === "pertinentes" && a.categorie === "non_pertinente") return false;
     if (f.categorie && f.categorie !== "pertinentes" && a.categorie !== f.categorie) return false;
     if (f.urgence && urgence(a)[0] !== f.urgence) return false;
     // Les ajouts manuels (sans score) restent toujours visibles
     if (f.scoreMin && a.score !== null && a.score !== undefined && a.score < Number(f.scoreMin)) return false;
     if (f.miens && a.responsable?.email !== etat.utilisateur.email) return false;
-    // Les AO à qualifier dont la date est passée sortent de la file
-    if (f.onglet === "a_qualifier" && urgence(a)[0] === "expiree") return false;
     if (texte && !`${a.titre} ${a.acheteur} ${a.lieu} ${a.ref}`.toLowerCase().includes(texte)) return false;
     return true;
   });
@@ -397,22 +542,10 @@ function vueListe() {
   const masques = filtrer(tous, { ...f, scoreMin: "" }).length - liste.length;
   const focus = document.activeElement?.id;
 
-  let lignes = "", catPrec = null;
-  for (const a of liste) {
-    if (grouper && a.categorie !== catPrec) {
-      catPrec = a.categorie;
-      const n = liste.filter((x) => x.categorie === a.categorie).length;
-      lignes += `<tr class="groupe-cat"><td colspan="6">${esc(CATEGORIES[a.categorie] || a.categorie)} · ${n}</td></tr>`;
-    }
-    lignes += `<tr data-id="${esc(a.id)}">
-      <td>${pastilleUrgence(a)}<div class="sous">${fmtDate(a.date_limite, false)}</div></td>
-      <td>${pastilleScore(a.score)}</td>
-      <td><div class="titre-ao">${esc(a.titre)}</div><div class="sous">${esc(a.acheteur)}${grouper ? "" : ` · ${esc(CATEGORIES[a.categorie] || a.categorie)}`}</div>${badges(a)}</td>
-      <td class="masquer-mobile">${esc(a.lieu)}</td>
-      <td>${esc(STATUTS[a.statut] || a.statut)}${a.responsable ? `<div class="sous">${nomCourt(a.responsable)}</div>` : ""}</td>
-      <td class="masquer-mobile sous">${esc((a.source || "").toUpperCase())}<br>${fmtDate(a.date_publication, false)}</td>
-    </tr>`;
-  }
+  const dansManques = f.onglet === "manques";
+  const noteOnglet = dansManques ? `<p class="aide note-onglet">Dossiers que l'équipe n'a pas pu traiter faute de temps ou de ressources : non commencés à moins de ${DELAI_MIN_REPONSE} jours de l'échéance (ou échéance dépassée), et dossiers abandonnés pour délai insuffisant ou charge de l'atelier.</p>` : "";
+  const corps = !liste.length ? `<p class="vide">Aucun appel d'offres ne correspond à ces filtres.</p>`
+    : f.vue === "tableau" ? htmlTableau(liste, grouper) : htmlCartes(liste, grouper, dansManques);
 
   $("#app").innerHTML = `
     <div class="onglets">${ONGLETS.map((o) => `<button data-onglet="${o[0]}" class="${f.onglet === o[0] ? "actif" : ""}">${o[1]}<span class="nb">${compte(o)}</span></button>`).join("")}</div>
@@ -441,15 +574,16 @@ function vueListe() {
         <option value="categorie" ${f.tri === "categorie" ? "selected" : ""}>Trier : type de réponse</option>
       </select>
       <label class="case"><input type="checkbox" id="f-miens" ${f.miens ? "checked" : ""}> Mes dossiers</label>
+      <div class="bascule" role="group" aria-label="Affichage">
+        <button data-vue="cartes" class="${f.vue !== "tableau" ? "actif" : ""}">Cartes</button><button data-vue="tableau" class="${f.vue === "tableau" ? "actif" : ""}">Tableau</button>
+      </div>
       ${etat.utilisateur.role === "admin" ? `<button class="btn btn-secondaire" id="lancer-collecte-liste" title="Interroger BOAMP et TED maintenant">↻ Lancer une collecte</button>` : ""}
     </div>
     ${legendeScores()}
+    ${f.vue !== "tableau" ? legendeEtiquettes() : ""}
     ${masques > 0 ? `<p class="aide" style="margin:-6px 0 12px">${liste.length} AO affichés · ${masques} sous le score minimum masqués
       (<button class="btn-lien" id="voir-tous-scores">tout afficher</button>)</p>` : ""}
-    ${liste.length ? `<div class="tableau"><table>
-      <thead><tr><th>Échéance</th><th>Score</th><th>Objet</th><th class="masquer-mobile">Lieu</th><th>Statut</th><th class="masquer-mobile">Source</th></tr></thead>
-      <tbody>${lignes}</tbody></table></div>`
-      : `<p class="vide">Aucun appel d'offres ne correspond à ces filtres.</p>`}`;
+    ${noteOnglet}${corps}`;
 
   if (f.categorie === "") $("#f-cat").value = "";
   $$("[data-onglet]").forEach((b) => (b.onclick = () => { f.onglet = b.dataset.onglet; sauverFiltres(); vueListe(); }));
@@ -461,7 +595,12 @@ function vueListe() {
   $("#f-tri").onchange = (e) => { f.tri = e.target.value; sauverFiltres(); vueListe(); };
   $("#voir-tous-scores") && ($("#voir-tous-scores").onclick = () => { f.scoreMin = ""; sauverFiltres(); vueListe(); });
   $("#lancer-collecte-liste") && ($("#lancer-collecte-liste").onclick = () => lancerWorkflow("collecte"));
-  $$("tbody tr[data-id]").forEach((tr) => (tr.onclick = () => (location.hash = `#/ao/${encodeURIComponent(tr.dataset.id)}`)));
+  $$("[data-vue]").forEach((b) => (b.onclick = () => { f.vue = b.dataset.vue; sauverFiltres(); vueListe(); }));
+  $$("tbody tr[data-id], .ao[data-id]").forEach((el) => {
+    const ouvrir = () => (location.hash = `#/ao/${encodeURIComponent(el.dataset.id)}`);
+    el.onclick = ouvrir;
+    el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); ouvrir(); } };
+  });
   if (focus === "f-texte") { const i = $("#f-texte"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
 }
 
@@ -787,7 +926,10 @@ async function vueBilan() {
   };
 
   // Dossiers à traiter et échéances
-  const aTraiter = pertinents.filter((a) => ["a_qualifier", "pris_en_charge", "en_redaction"].includes(a.statut));
+  const aTraiter = pertinents.filter((a) => ["a_qualifier", "pris_en_charge", "en_redaction"].includes(a.statut)
+    && !(a.statut === "a_qualifier" && delaiTropCourt(a)));
+  const aQualifier = pertinents.filter((a) => a.statut === "a_qualifier" && !delaiTropCourt(a)).length;
+  const manques = aos.filter((a) => estManque(a) && a.categorie !== "non_pertinente" && (a.score == null || a.score >= SEUIL_PERTINENT)).length;
   const echeances = aTraiter
     .map((a) => ({ a, j: joursRestants(a.date_limite) }))
     .filter((x) => x.j !== null && x.j >= 0)
@@ -814,15 +956,16 @@ async function vueBilan() {
     .forEach((a) => { const n = a.responsable.nom || a.responsable.email; charge[n] = (charge[n] || 0) + 1; });
 
   const lignesEcheances = echeances.slice(0, 6).map(({ a }) => `<a class="echeance" href="#/ao/${encodeURIComponent(a.id)}">
-      <div><div class="titre-ao">${esc(a.titre)}</div><div class="sous">${esc(a.acheteur || "")}${a.responsable ? ` · ${nomCourt(a.responsable)}` : ""} · ${esc(STATUTS[a.statut] || a.statut)}</div></div>
+      <div><div class="titre-ao" title="${esc(a.titre)}">${esc(titreCourt(a))}</div><div class="sous">${esc(a.acheteur || "")}${a.responsable ? ` · ${nomCourt(a.responsable)}` : ""} · ${esc(STATUTS[a.statut] || a.statut)}</div></div>
       <div>${pastilleUrgence(a)}</div></a>`).join("");
 
   $("#app").innerHTML = `<h1>Bilan</h1>
     <div class="chiffres">
       <div class="chiffre"><div class="val">${depuis30}</div><div class="lib">AO pertinents détectés (30 j)</div></div>
-      <div class="chiffre"><div class="val">${statuts.a_qualifier || 0}</div><div class="lib">À qualifier</div></div>
+      <div class="chiffre"><div class="val">${aQualifier}</div><div class="lib">À qualifier</div></div>
       <div class="chiffre ${proches ? "alerte" : ""}"><div class="val">${proches}</div><div class="lib">Échéances à moins de ${SEUIL_CRITIQUE} jours</div></div>
       <div class="chiffre"><div class="val">${(statuts.pris_en_charge || 0) + (statuts.en_redaction || 0)}</div><div class="lib">En cours</div></div>
+      <div class="chiffre"><div class="val">${manques}</div><div class="lib">Laissés de côté faute de ressources</div></div>
       <div class="chiffre"><div class="val">${statuts.depose || 0}</div><div class="lib">Offres déposées en attente${montantDepose ? ` · ${euros(montantDepose)}` : ""}</div></div>
       <div class="chiffre"><div class="val">${gagnes + perdus ? Math.round((gagnes / (gagnes + perdus)) * 100) + " %" : "—"}</div><div class="lib">Taux de réussite (${gagnes} / ${gagnes + perdus})${montantGagne ? ` · ${euros(montantGagne)} gagnés` : ""}</div></div>
     </div>

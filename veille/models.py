@@ -28,6 +28,7 @@ class Avis:
     titulaire: str = ""             # pour les avis d'attribution
     avis_lies: list[str] = field(default_factory=list)      # réf. des avis initiaux (rectificatifs)
     description: str = ""           # texte libre extrait (pour notation et synthèse)
+    montant_estime: float | None = None   # valeur estimée HT en euros, si l'avis la donne
     brut: dict[str, Any] = field(default_factory=dict)      # données source (non stockées en entier)
 
     @property

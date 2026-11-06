@@ -163,6 +163,25 @@ def extraire_texte(donnees: dict, limite: int = 15000) -> str:
     return texte[:limite]
 
 
+_CLES_MONTANT = re.compile(r"(val_?estim|valeur|montant|budget)", re.I)
+_CLES_MONTANT_EXCLUES = re.compile(r"(devise|monnaie|currency|unite|taux|tva|caution|garantie|avance|penalit|seuil|prime)", re.I)
+
+
+def extraire_montant(donnees: dict) -> float | None:
+    """Plus grande valeur estimée numérique trouvée dans le JSON de l'avis (euros HT)."""
+    valeurs = []
+    for chemin, val in _parcourir(donnees):
+        if val is None or not _CLES_MONTANT.search(chemin) or _CLES_MONTANT_EXCLUES.search(chemin):
+            continue
+        try:
+            v = float(str(val).replace("\u00a0", "").replace(" ", "").replace(",", "."))
+        except ValueError:
+            continue
+        if 5_000 <= v <= 2_000_000_000:
+            valeurs.append(v)
+    return round(max(valeurs)) if valeurs else None
+
+
 def extraire_visite(texte: str) -> bool | None:
     t = texte.lower()
     if re.search(r"visite[^.]{0,60}(obligatoire|imp[ée]rative)", t):
@@ -197,6 +216,7 @@ def vers_avis(l: dict, donnees: dict | None = None) -> Avis:
         titulaire=premier_texte(l.get("titulaire")),
         avis_lies=[a for a in unique(re.findall(r"\b\d{2}-\d{3,7}\b", f"{l.get('annonce_lie')} {l.get('annonces_anterieures')}")) if a != idweb],
         description=description,
+        montant_estime=extraire_montant(donnees) if donnees else None,
         brut={"famille": l.get("famille_libelle"), "etat": l.get("etat")},
     )
 

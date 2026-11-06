@@ -12,7 +12,9 @@ sécurité : elle ne doit jamais quitter les secrets GitHub.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,8 @@ import requests
 
 from .util import maintenant
 
+log = logging.getLogger("veille.store")
+
 
 class Store:
     def get(self, id_: str) -> dict | None: ...
@@ -30,6 +34,7 @@ class Store:
     def evenement(self, id_: str, type_: str, details: dict | None = None, par: str = "veille") -> None: ...
     def par_cle_doublon(self, cle: str) -> dict | None: ...
     def synthese_demandee(self, limite: int = 10) -> list[dict]: ...
+    def a_renoter(self, version: int, tout: bool = False, limite: int = 1000) -> list[dict]: ...
     def detectes_depuis(self, depuis: datetime) -> list[dict]: ...
     def enregistrer_collecte(self, id_: str, data: dict) -> None: ...
     def telecharger(self, chemin: str) -> bytes: ...
@@ -81,11 +86,33 @@ class SupabaseStore(Store):
         lignes = self._rest("GET", "aos", f"id=eq.{quote(id_)}&select=*")
         return lignes[0] if lignes else None
 
+    def _ecrire_aos(self, methode: str, params: str, corps: dict) -> None:
+        """Écrit dans « aos » ; ignore les colonnes que la base ne connaît pas encore
+        (migration supabase/003_travaux.sql non lancée) au lieu de bloquer la collecte."""
+        corps = dict(corps)
+        for _ in range(10):
+            try:
+                self._rest(methode, "aos", params, corps=corps, prefer="return=minimal")
+                return
+            except RuntimeError as e:
+                m = re.search(r"Could not find the '([^']+)' column", str(e))
+                if not m or m.group(1) not in corps:
+                    raise
+                log.warning("Colonne « %s » absente de la base : ignorée (lancer supabase/003_travaux.sql)", m.group(1))
+                corps.pop(m.group(1))
+        raise RuntimeError("Trop de colonnes inconnues dans l'écriture de « aos »")
+
     def creer(self, id_, data):
-        self._rest("POST", "aos", corps={**data, "id": id_}, prefer="return=minimal")
+        self._ecrire_aos("POST", "", {**data, "id": id_})
 
     def maj(self, id_, data):
-        self._rest("PATCH", "aos", f"id=eq.{quote(id_)}", corps=data, prefer="return=minimal")
+        self._ecrire_aos("PATCH", f"id=eq.{quote(id_)}", data)
+
+    def a_renoter(self, version, tout=False, limite=1000):
+        filtre = "source=neq.manuel&score=not.is.null"
+        if not tout:
+            filtre += f"&or=(notation_v.is.null,notation_v.neq.{int(version)})"
+        return self._rest("GET", "aos", f"{filtre}&select=*&order=id&limit={limite}")
 
     def evenement(self, id_, type_, details=None, par="veille"):
         self._rest("POST", "evenements", corps={"ao_id": id_, "type": type_, "details": details or {}, "par": par},
@@ -156,6 +183,11 @@ class FichierStore(Store):
 
     def detectes_depuis(self, depuis):
         return [a for a in self.data["aos"].values() if (a.get("maj_veille_le") or depuis) >= depuis]
+
+    def a_renoter(self, version, tout=False, limite=1000):
+        return [a for a in self.data["aos"].values()
+                if a.get("source") != "manuel" and a.get("score") is not None
+                and (tout or a.get("notation_v") != version)][:limite]
 
     def enregistrer_collecte(self, id_, data):
         self.data["collectes"][id_] = data

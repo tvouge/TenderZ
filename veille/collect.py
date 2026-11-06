@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 from . import digest
 from .models import Avis
-from .scoring import noter
+from .scoring import NOTATION_VERSION, noter
 from .sources import boamp, ted
 from .store import Store, ouvrir
 from .util import PARIS, charger_profil, maintenant, parser_date
@@ -106,6 +106,10 @@ def integrer(store: Store, avis: Avis, idf: bool, profil: dict) -> str:
         score=note.score,
         score_detail=note.detail,
         idf=idf,
+        titre_court=note.titre_court,
+        travaux=note.travaux,
+        montant_estime=note.montant,
+        notation_v=NOTATION_VERSION,
         maj_veille_le=maintenant(),
     )
 
@@ -155,7 +159,49 @@ def integrer(store: Store, avis: Avis, idf: bool, profil: dict) -> str:
     return "nouveau"
 
 
-def executer(local: bool = False, forcer_recap: bool = False, sans_mail: bool = False) -> dict:
+def avis_depuis_document(d: dict) -> Avis:
+    """Reconstitue un avis à partir d'une ligne déjà enregistrée (pour le renotage)."""
+    return Avis(
+        source=d.get("source") or "?", ref=str(d.get("ref") or d["id"]), titre=d.get("titre") or "", url=d.get("url") or "",
+        acheteur=d.get("acheteur") or "", nature=d.get("nature") or "", type_marche=d.get("type_marche") or [],
+        departements=d.get("departements") or [], lieu=d.get("lieu") or "", nuts=d.get("nuts") or [],
+        cpv=d.get("cpv") or [], descripteurs=d.get("descripteurs") or [], description=d.get("description") or "",
+        montant_estime=d.get("montant_estime"),
+    )
+
+
+def renoter(store: Store, profil: dict, tout: bool = False) -> int:
+    """Applique les règles de notation actuelles aux AO enregistrés avec d'anciennes règles.
+
+    Les dossiers déjà pris en charge ou décidés gardent leur score et leur catégorie
+    (on ne les fait pas disparaître des listes) ; ils reçoivent seulement le titre court,
+    les étiquettes de travaux et le budget.
+    """
+    try:
+        lignes = store.a_renoter(NOTATION_VERSION, tout)
+    except Exception as e:  # colonne notation_v absente (migration non lancée) ou API injoignable
+        log.warning("Renotage ignoré : %s", e)
+        return 0
+    n = 0
+    for d in lignes:
+        try:
+            note = noter(avis_depuis_document(d), profil, bool(d.get("idf")))
+            maj = dict(titre_court=note.titre_court, travaux=note.travaux, montant_estime=note.montant,
+                       notation_v=NOTATION_VERSION)
+            if d.get("statut") == "a_qualifier":
+                maj.update(score=note.score, score_detail=note.detail)
+                if not d.get("categorie_corrigee"):
+                    maj["categorie"] = note.categorie
+            store.maj(d["id"], maj)
+            n += 1
+        except Exception:
+            log.exception("Renotage %s", d.get("id"))
+    if n:
+        log.info("%d AO renotés (règles v%d)", n, NOTATION_VERSION)
+    return n
+
+
+def executer(local: bool = False, forcer_recap: bool = False, sans_mail: bool = False, renoter_tout: bool = False) -> dict:
     profil = charger_profil()
     store = ouvrir(local=local)
     debut = maintenant()
@@ -169,12 +215,14 @@ def executer(local: bool = False, forcer_recap: bool = False, sans_mail: bool = 
             erreurs.append(f"Intégration {avis.id} : {e}")
             log.exception("Intégration %s", avis.id)
 
+    renotes = renoter(store, profil, tout=renoter_tout)
+
     compte_rendu = {
         "debut": debut,
         "fin": maintenant(),
         "fenetre_jours": profil["fenetre_jours"],
         "sources": stats,
-        "resultats": compteur,
+        "resultats": {**compteur, "renote": renotes},
         "erreurs": erreurs,
     }
     store.enregistrer_collecte(debut.astimezone(PARIS).strftime("%Y-%m-%d_%H%M"), compte_rendu)
@@ -194,8 +242,9 @@ def main() -> None:
     p.add_argument("--local", action="store_true", help="mémoire locale (essai)")
     p.add_argument("--recap", action="store_true", help="forcer l'envoi du récapitulatif")
     p.add_argument("--sans-mail", action="store_true")
+    p.add_argument("--renoter", action="store_true", help="renoter tous les AO avec les règles actuelles")
     a = p.parse_args()
-    cr = executer(local=a.local, forcer_recap=a.recap, sans_mail=a.sans_mail)
+    cr = executer(local=a.local, forcer_recap=a.recap, sans_mail=a.sans_mail, renoter_tout=a.renoter)
     if cr["erreurs"] and not any(cr["sources"].values()):
         raise SystemExit("Aucune source n'a répondu : voir les erreurs ci-dessus.")
 

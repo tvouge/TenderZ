@@ -117,6 +117,83 @@ mots_negatifs:    # -30
 # Bonus géographique
 bonus_idf: 15
 
+# --- Notation v2 : les critères, dans l'ordre d'importance -------------
+#  1. Le contenu : est-ce notre métier ? (CPV + mots-clés ci-dessus, plafonné)
+#  2. La région : Île-de-France en priorité, ailleurs possible si très pertinent
+#  3. Le périmètre : un lot que l'on peut tenir seul, et pas plus de la moitié
+#     de travaux hors atelier
+#  4. Le budget : 100 000 – 500 000 € idéalement, jusqu'à 1 M€
+# Chaque point est justifié dans « score_detail » (fiche de l'AO).
+notation:
+  metier_max: 60            # plafond des points « contenu » (CPV + mots-clés)
+  region:
+    hors_idf: -10           # hors Île-de-France (le bonus IDF est « bonus_idf »)
+    exception_metier: 40    # …sauf si les points « contenu » atteignent ce seuil : on se déplace pour un dossier vraiment dans notre cœur de métier
+  budget:                   # montants HT, en euros
+    ideal_min: 100000
+    ideal_max: 500000
+    max: 1000000
+    points:
+      ideal: 10             # entre ideal_min et ideal_max
+      haut: 4               # entre ideal_max et max
+      bas: -8               # sous ideal_min
+      tres_haut: -15        # au-dessus de max
+  perimetre:
+    lot_isolable: 5         # un lot métier clairement identifiable (« Lot 4 : menuiseries… »)
+    cotraitance: -20        # marché global (TCE, entreprise générale…) : il faudrait des partenaires
+    hors_metier_majoritaire: -35   # plus de la moitié du périmètre hors métier
+    hors_metier_important: -12     # entre un tiers et la moitié
+
+# Indices d'un marché global qu'ADR ne peut pas tenir seul (pas de partenaire plaquiste, etc.)
+indices_cotraitance:
+  - tous corps d'état
+  - tous corps d'etat
+  - tce
+  - entreprise générale
+  - conception-réalisation
+  - conception réalisation
+  - macro-lot
+  - macrolot
+  - marché global
+
+# Vocabulaire des travaux : sert aux étiquettes de la liste et à l'estimation
+# de la part de travaux hors métier.
+travaux:
+  adr:                      # le cœur de l'atelier
+    - nom: Portes
+      mots: [portes, bloc-porte, blocs-portes, bloc porte, porte coupe-feu, portes coupe-feu, huisserie, huisseries, porte palière]
+    - nom: Menuiserie intérieure
+      mots: [menuiserie intérieure, menuiseries intérieures, menuiserie bois, menuiseries bois, menuiserie, menuiseries, boiseries, ébénisterie]
+    - nom: Mobilier
+      mots: [mobilier, mobilier sur mesure, meuble, meubles, mobiliers]
+    - nom: Agencement
+      mots: [agencement, agencements, aménagement intérieur, aménagements intérieurs, banque d'accueil, banques d'accueil, comptoir, comptoirs, cuisine équipée, espace VIP, loges]
+    - nom: Habillages
+      mots: [habillage mural, habillages muraux, claustra, claustras, panneaux acoustiques, lambris, bardage intérieur]
+    - nom: Scénographie
+      mots: [scénographie, muséographie, stand, stands, PLV, exposition, expositions]
+    - nom: Parquet
+      mots: [parquet, parquets, plancher bois, plancher]
+  sous_traite:              # on pilote, un sous-traitant exécute
+    - nom: Métallerie
+      mots: [métallerie, serrurerie, ferronnerie, acier, inox]
+    - nom: Vitrerie
+      mots: [vitrerie, miroiterie, vitrage, vitrages, cloison vitrée, cloisons vitrées, verrière]
+    - nom: Plexi et signalétique
+      mots: [plexiglas, plexi, pmma, signalétique, enseigne, enseignes, logo lumineux, logos lumineux, lettres lumineuses]
+  hors_metier:              # ni notre atelier, ni de la simple sous-traitance
+    - nom: Plâtrerie et cloisons
+      mots: [plâtrerie, placo, cloisons sèches, cloison sèche, plaques de plâtre, doublage, faux plafond, faux plafonds, plafonds suspendus]
+    - nom: Peinture et sols
+      mots: [peinture, peintures, revêtement de sol, revêtements de sol, carrelage, faïence, sol souple, sols souples, moquette]
+    - nom: Électricité et fluides
+      mots: [électricité, courant fort, courants forts, courant faible, courants faibles, plomberie, sanitaires, chauffage, ventilation, climatisation, cvc]
+    - nom: Gros œuvre et structure
+      mots: [gros œuvre, maçonnerie, démolition, terrassement, charpente, couverture, étanchéité, façade, façades, ravalement, désamiantage, vrd, ascenseur, ascenseurs]
+    - nom: Menuiseries extérieures
+      mots: [menuiserie extérieure, menuiseries extérieures, fenêtres, châssis, volets, stores, menuiserie aluminium, menuiseries aluminium, pvc]
+
+
 # Indices d'un marché global → réponse en groupement ou sous-traitance
 indices_groupement:
   - tous corps d'état

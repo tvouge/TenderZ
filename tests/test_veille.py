@@ -383,3 +383,91 @@ def test_normaliser_fiche_formes_variees():
     assert normaliser_fiche({"resume": "x", "visite": "Non précisée", "estimation_cout": "Non chiffrable"})["visite"]["details"] == "Non précisée"
     with pytest.raises(RuntimeError):
         normaliser_fiche("pas du json")
+
+
+# --- notation v2 : région, budget, périmètre, étiquettes ---------------------
+
+from veille.analyse import extraire_montant_texte, titre_court  # noqa: E402
+from veille.scoring import NOTATION_VERSION  # noqa: E402
+
+
+def avis_test(titre, description="", cpv=("45421000",), **k):
+    return Avis(source="boamp", ref="t1", titre=titre, url="u", cpv=list(cpv), description=description,
+                departements=["75"], **k)
+
+
+def test_budget_dans_la_cible_et_hors_cible():
+    base = "Agencement et menuiserie intérieure d'un siège"
+    dans = noter(avis_test(base, montant_estime=250_000), PROFIL, True)
+    petit = noter(avis_test(base, montant_estime=40_000), PROFIL, True)
+    gros = noter(avis_test(base, montant_estime=3_000_000), PROFIL, True)
+    inconnu = noter(avis_test(base), PROFIL, True)
+    assert dans.score > inconnu.score > petit.score > gros.score
+    assert any("dans la cible" in d for d in dans.detail)
+    assert any("non communiqué" in d for d in inconnu.detail)
+
+
+def test_budget_lu_dans_le_texte_et_les_donnees_boamp():
+    assert extraire_montant_texte("Le montant estimé du marché est de 250 000 euros HT") == 250_000
+    assert extraire_montant_texte("budget prévisionnel : 1,2 millions d'euros") == 1_200_000
+    assert extraire_montant_texte("aucun chiffre") is None
+    assert boamp.extraire_montant({"A": {"VAL_ESTIMEE": "300000", "DEVISE": "EUR"}}) == 300_000
+
+
+def test_region_hors_idf_penalisee_mais_possible():
+    a = avis_test("Agencement et scénographie d'un musée")
+    idf = noter(a, PROFIL, True)
+    ailleurs = noter(a, PROFIL, False)
+    assert ailleurs.score >= PROFIL["seuils"]["pertinent"]  # reste « à qualifier »
+    assert any("déplacement envisageable" in d for d in ailleurs.detail)
+    # Contenu moyen : la pénalité hors IDF s'applique
+    moyen = avis_test("Fourniture de mobilier", cpv=())
+    assert noter(moyen, PROFIL, True).score - noter(moyen, PROFIL, False).score == PROFIL["bonus_idf"] - PROFIL["notation"]["region"]["hors_idf"]
+
+
+def test_marche_global_penalise_et_lot_metier_favorise():
+    global_ = noter(avis_test("Réhabilitation tous corps d'état d'un collège"), PROFIL, True)
+    lot = noter(avis_test("Lot 4 : menuiseries intérieures bois d'un collège"), PROFIL, True)
+    assert lot.score > global_.score
+    assert any("marché global" in d for d in global_.detail)
+    assert any("Lot métier" in d for d in lot.detail)
+
+
+def test_plus_de_la_moitie_hors_metier_est_ecartee():
+    texte = "Rénovation : plâtrerie, peinture, plomberie, électricité et pose de quelques portes"
+    n = noter(avis_test("Réhabilitation d'un bâtiment", texte, cpv=()), PROFIL, True)
+    assert any("hors métier" in d and "moitié" in d for d in n.detail)
+    assert n.score < PROFIL["seuils"]["pertinent"]
+    propre = noter(avis_test("Fourniture de mobilier sur mesure et de portes", "menuiserie intérieure, habillages muraux"), PROFIL, True)
+    assert propre.score >= PROFIL["seuils"]["synthese_auto"]
+
+
+def test_marche_alloti_avec_lot_metier_nest_pas_ecarte():
+    texte = "Lot 1 : plâtrerie, peinture\nLot 2 : plomberie, électricité\nLot 3 : menuiserie intérieure et portes"
+    n = noter(avis_test("Réhabilitation d'une école", texte, cpv=()), PROFIL, True)
+    assert not any("moitié" in d for d in n.detail)
+
+
+def test_etiquettes_de_travaux_et_titre_court():
+    a = avis_test("MARCHE DE TRAVAUX POUR L'AGENCEMENT DU MUSEE", "banque d'accueil, métallerie, vitrerie, peinture", cpv=())
+    n = noter(a, PROFIL, True)
+    types = {t["n"]: t["t"] for t in n.travaux}
+    assert types["Agencement"] == "adr" and types["Métallerie"] == "ss" and types["Peinture et sols"] == "hors"
+    assert titre_court("Accord-cadre pour la fourniture de mobilier").startswith("La fourniture")
+    assert len(titre_court("x " * 200)) <= 90
+    assert titre_court("Lot 2 : Menuiseries intérieures").startswith("Lot 2 : menuiseries")
+
+
+def test_renotage_des_anciennes_regles(store):
+    a = boamp.vers_avis(ligne_boamp(), DONNEES)
+    collect.integrer(store, a, True, PROFIL)
+    store.maj(a.id, {"notation_v": 1, "score": 3, "travaux": [], "titre_court": None})
+    pris = boamp.vers_avis(ligne_boamp(idweb="26-100002", objet="Agencement d'une médiathèque"), DONNEES)
+    collect.integrer(store, pris, True, PROFIL)
+    store.maj(pris.id, {"notation_v": 1, "score": 3, "statut": "pris_en_charge"})
+    assert collect.renoter(store, PROFIL) == 2
+    assert store.get(a.id)["score"] > 3 and store.get(a.id)["notation_v"] == NOTATION_VERSION
+    assert store.get(a.id)["titre_court"] and store.get(a.id)["travaux"]
+    assert store.get(pris.id)["score"] == 3          # dossier déjà pris : score conservé
+    assert store.get(pris.id)["travaux"]             # mais étiquettes ajoutées
+    assert collect.renoter(store, PROFIL) == 0       # rien à refaire
