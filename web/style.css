@@ -191,3 +191,20 @@ dialog select, dialog input { width: 100%; }
   .tableau td, .tableau th { padding: 10px 8px; }
   .barres .ligne-barre { grid-template-columns: 130px 1fr 30px; }
 }
+
+/* --- tableau de bord (bilan) ------------------------------------------ */
+.duo { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.chiffre.alerte { border-color: #f4c7c3; background: var(--critique-pale); }
+.chiffre.alerte .val { color: var(--critique); }
+.echeances { display: flex; flex-direction: column; }
+.echeance { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--ligne); text-decoration: none; }
+.echeance:last-child { border-bottom: none; }
+.echeance:hover { background: #fcfbf9; }
+.histo { display: flex; align-items: flex-end; gap: 8px; height: 170px; padding-top: 8px; }
+.col-histo { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; font-size: .8rem; }
+.col-histo .tige { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; }
+.col-histo:last-child .tige { background: var(--accent-fonce); }
+.col-histo span { color: var(--doux); }
+@media (max-width: 900px) {
+  .duo { grid-template-columns: 1fr; gap: 0; }
+}

@@ -768,24 +768,73 @@ async function vueBilan() {
   const statuts = par("statut", pertinents);
   const motifs = par("motif_abandon", aos.filter((a) => a.statut === "abandonne"));
   const gagnes = statuts.gagne || 0, perdus = statuts.perdu || 0;
-  const depuis30 = aos.filter((a) => versDate(a.detecte_le) > Date.now() - 30 * 86400000 && a.categorie !== "non_pertinente").length;
-  const barres = (obj, libelles) => {
+  const jourMs = 86400000;
+  const depuis30 = aos.filter((a) => versDate(a.detecte_le) > Date.now() - 30 * jourMs && a.categorie !== "non_pertinente").length;
+  const barres = (obj, libelles, ordre) => {
     const max = Math.max(1, ...Object.values(obj));
-    return Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="ligne-barre"><span>${esc(libelles[k] || k)}</span>
+    const entrees = ordre ? ordre.filter((k) => k in obj).map((k) => [k, obj[k]]) : Object.entries(obj).sort((a, b) => b[1] - a[1]);
+    return entrees.map(([k, v]) => `<div class="ligne-barre"><span>${esc(libelles[k] || k)}</span>
       <div class="fond-barre"><div class="barre-val" style="width:${(v / max) * 100}%"></div></div><b>${v}</b></div>`).join("") || `<p class="sous">Pas encore de données.</p>`;
   };
+
+  // Dossiers à traiter et échéances
+  const aTraiter = pertinents.filter((a) => ["a_qualifier", "pris_en_charge", "en_redaction"].includes(a.statut));
+  const echeances = aTraiter
+    .map((a) => ({ a, j: joursRestants(a.date_limite) }))
+    .filter((x) => x.j !== null && x.j >= 0)
+    .sort((x, y) => x.j - y.j);
+  const proches = echeances.filter((x) => x.j < SEUIL_CRITIQUE).length;
+  const montantDepose = pertinents.filter((a) => a.statut === "depose").reduce((t, a) => t + (Number(a.montant_depose) || 0), 0);
+  const montantGagne = pertinents.filter((a) => a.statut === "gagne").reduce((t, a) => t + (Number(a.montant_depose) || 0), 0);
+
+  // Détections des 8 dernières semaines (0 = semaine en cours)
+  const semaines = Array(8).fill(0);
+  pertinents.forEach((a) => {
+    const d = versDate(a.detecte_le);
+    if (!d) return;
+    const n = Math.floor((Date.now() - d) / (7 * jourMs));
+    if (n >= 0 && n < 8) semaines[n] += 1;
+  });
+  const maxSem = Math.max(1, ...semaines);
+  const histo = semaines.map((v, n) => ({ v, n })).reverse().map(({ v, n }) => `<div class="col-histo" title="${v} AO détecté(s) ${n === 0 ? "ces 7 derniers jours" : `il y a ${n} semaine${n > 1 ? "s" : ""}`}">
+      <b>${v}</b><div class="tige" style="height:${Math.max(3, (v / maxSem) * 100)}%"></div><span>${n === 0 ? "7 j" : `-${n} s`}</span></div>`).join("");
+
+  // Charge par responsable (dossiers en cours ou déposés)
+  const charge = {};
+  pertinents.filter((a) => ["pris_en_charge", "en_redaction", "depose"].includes(a.statut) && a.responsable)
+    .forEach((a) => { const n = a.responsable.nom || a.responsable.email; charge[n] = (charge[n] || 0) + 1; });
+
+  const lignesEcheances = echeances.slice(0, 6).map(({ a }) => `<a class="echeance" href="#/ao/${encodeURIComponent(a.id)}">
+      <div><div class="titre-ao">${esc(a.titre)}</div><div class="sous">${esc(a.acheteur || "")}${a.responsable ? ` · ${nomCourt(a.responsable)}` : ""} · ${esc(STATUTS[a.statut] || a.statut)}</div></div>
+      <div>${pastilleUrgence(a)}</div></a>`).join("");
 
   $("#app").innerHTML = `<h1>Bilan</h1>
     <div class="chiffres">
       <div class="chiffre"><div class="val">${depuis30}</div><div class="lib">AO pertinents détectés (30 j)</div></div>
       <div class="chiffre"><div class="val">${statuts.a_qualifier || 0}</div><div class="lib">À qualifier</div></div>
+      <div class="chiffre ${proches ? "alerte" : ""}"><div class="val">${proches}</div><div class="lib">Échéances à moins de ${SEUIL_CRITIQUE} jours</div></div>
       <div class="chiffre"><div class="val">${(statuts.pris_en_charge || 0) + (statuts.en_redaction || 0)}</div><div class="lib">En cours</div></div>
-      <div class="chiffre"><div class="val">${statuts.depose || 0}</div><div class="lib">Offres déposées en attente</div></div>
-      <div class="chiffre"><div class="val">${gagnes + perdus ? Math.round((gagnes / (gagnes + perdus)) * 100) + " %" : "—"}</div><div class="lib">Taux de réussite (${gagnes} / ${gagnes + perdus})</div></div>
+      <div class="chiffre"><div class="val">${statuts.depose || 0}</div><div class="lib">Offres déposées en attente${montantDepose ? ` · ${euros(montantDepose)}` : ""}</div></div>
+      <div class="chiffre"><div class="val">${gagnes + perdus ? Math.round((gagnes / (gagnes + perdus)) * 100) + " %" : "—"}</div><div class="lib">Taux de réussite (${gagnes} / ${gagnes + perdus})${montantGagne ? ` · ${euros(montantGagne)} gagnés` : ""}</div></div>
     </div>
-    <div class="fiche" style="grid-template-columns:1fr 1fr">
+    <div class="duo">
+      <div class="carte"><h2>Prochaines échéances</h2>
+        <div class="echeances">${lignesEcheances || `<p class="sous">Aucun dossier à traiter avec une date limite à venir.</p>`}</div>
+        ${echeances.length > 6 ? `<p class="aide" style="margin-bottom:0">Et ${echeances.length - 6} autre${echeances.length - 6 > 1 ? "s" : ""} : voir la liste des AO.</p>` : ""}
+      </div>
+      <div class="carte"><h2>Détections par semaine</h2>
+        <div class="histo">${histo}</div>
+        <p class="aide" style="margin-bottom:0">AO pertinents détectés sur les 8 dernières semaines.</p>
+      </div>
+    </div>
+    <div class="duo">
+      <div class="carte"><h2>Parcours des dossiers</h2><div class="barres">${barres(statuts, STATUTS, ["a_qualifier", "pris_en_charge", "en_redaction", "depose", "gagne", "perdu", "abandonne"])}</div></div>
       <div class="carte"><h2>Pourquoi on ne poursuit pas</h2><div class="barres">${barres(motifs, MOTIFS)}</div></div>
-      <div class="carte"><h2>Dossiers par statut</h2><div class="barres">${barres(statuts, STATUTS)}</div></div>
+    </div>
+    <div class="duo">
+      <div class="carte"><h2>Type de réponse</h2><div class="barres">${barres(par("categorie", pertinents), CATEGORIES)}</div></div>
+      <div class="carte"><h2>Charge par personne</h2><div class="barres">${barres(charge, {})}</div>
+        <p class="aide" style="margin-bottom:0">Dossiers pris en charge, en rédaction ou déposés.</p></div>
     </div>
     ${etat.utilisateur.role === "admin" ? `<div class="carte"><h2>Lancer maintenant</h2>
       <p class="aide">La collecte tourne automatiquement chaque jour ouvré à 6 h 17. Vous pouvez aussi la lancer à la demande.</p>
