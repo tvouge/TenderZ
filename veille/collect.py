@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from datetime import datetime, timedelta
 
 from . import digest
@@ -171,12 +172,14 @@ def avis_depuis_document(d: dict) -> Avis:
     )
 
 
-def renoter(store: Store, profil: dict, tout: bool = False) -> int:
+def renoter(store: Store, profil: dict, tout: bool = False, budget_s: float = 420) -> int:
     """Applique les règles de notation actuelles aux AO enregistrés avec d'anciennes règles.
 
     Les dossiers déjà pris en charge ou décidés gardent leur score et leur catégorie
     (on ne les fait pas disparaître des listes) ; ils reçoivent seulement le titre court,
     les étiquettes de travaux et le budget.
+    Le travail s'arrête au bout de `budget_s` secondes : le reste est repris à la collecte suivante,
+    ce qui évite de dépasser le délai maximal du job quand beaucoup d'AO changent de règles.
     """
     try:
         lignes = store.a_renoter(NOTATION_VERSION, tout)
@@ -184,7 +187,11 @@ def renoter(store: Store, profil: dict, tout: bool = False) -> int:
         log.warning("Renotage ignoré : %s", e)
         return 0
     n = 0
+    fin = time.monotonic() + budget_s
     for d in lignes:
+        if time.monotonic() > fin:
+            log.info("Renotage interrompu après %d AO (budget de temps) : suite à la prochaine collecte", n)
+            break
         try:
             note = noter(avis_depuis_document(d), profil, bool(d.get("idf")))
             maj = dict(titre_court=note.titre_court, travaux=note.travaux, a_faire=note.a_faire, montant_estime=note.montant,
@@ -231,10 +238,22 @@ def executer(local: bool = False, forcer_recap: bool = False, sans_mail: bool = 
 
     jour = JOURS[datetime.now(PARIS).weekday()]
     if not sans_mail and (forcer_recap or jour == profil["recap"]["jour"]):
-        depuis = maintenant() - timedelta(days=7)
-        liste = digest.destinataires(store.parametre("recap_destinataires"))
-        digest.envoyer(store.detectes_depuis(depuis), compte_rendu, profil, liste)
+        envoyer_recap(store, compte_rendu, profil)
     return compte_rendu
+
+
+def envoyer_recap(store: Store, compte_rendu: dict, profil: dict) -> bool:
+    """Envoie le récapitulatif ; un échec du mail est signalé mais ne fait pas échouer la collecte
+    (elle est déjà enregistrée)."""
+    depuis = maintenant() - timedelta(days=7)
+    liste = digest.destinataires(store.parametre("recap_destinataires"))
+    try:
+        return digest.envoyer(store.detectes_depuis(depuis), compte_rendu, profil, liste)
+    except digest.ErreurMail as e:
+        log.error("Récapitulatif non envoyé : %s", e)
+        print(f"::warning title=Récapitulatif non envoyé::{e}", flush=True)
+        compte_rendu["recap_erreur"] = str(e)
+        return False
 
 
 def main() -> None:
@@ -244,7 +263,16 @@ def main() -> None:
     p.add_argument("--recap", action="store_true", help="forcer l'envoi du récapitulatif")
     p.add_argument("--sans-mail", action="store_true")
     p.add_argument("--renoter", action="store_true", help="renoter tous les AO avec les règles actuelles")
+    p.add_argument("--test-mail", action="store_true", help="envoyer un mail de test et s'arrêter")
     a = p.parse_args()
+    if a.test_mail:
+        store = ouvrir(local=a.local)
+        try:
+            dest = digest.envoyer_test(digest.destinataires(store.parametre("recap_destinataires")))
+        except digest.ErreurMail as e:
+            raise SystemExit(f"Mail de test NON envoyé : {e}")
+        log.info("Mail de test envoyé à %s", ", ".join(dest))
+        return
     cr = executer(local=a.local, forcer_recap=a.recap, sans_mail=a.sans_mail, renoter_tout=a.renoter)
     if cr["erreurs"] and not any(cr["sources"].values()):
         raise SystemExit("Aucune source n'a répondu : voir les erreurs ci-dessus.")

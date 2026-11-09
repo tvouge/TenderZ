@@ -119,23 +119,82 @@ def destinataires(reglage) -> list[str]:
     return [d.strip() for d in os.environ.get("RECAP_DESTINATAIRES", "").split(",") if d.strip()]
 
 
-def envoyer(aos: list[dict], compte_rendu: dict, profil: dict, liste: list[str] | None = None) -> bool:
-    destinataires = liste if liste is not None else globals()["destinataires"](None)
-    utilisateur = os.environ.get("SMTP_USER")
-    mot_de_passe = os.environ.get("SMTP_PASSWORD")
-    if not (destinataires and utilisateur and mot_de_passe):
-        log.warning("Récap non envoyé : SMTP_USER, SMTP_PASSWORD ou destinataires manquants")
-        return False
-    sujet, corps = construire(aos, compte_rendu, profil)
+class ErreurMail(RuntimeError):
+    """L'envoi du mail a échoué ; le message dit quoi vérifier."""
+
+
+def _identifiants() -> tuple[str, str]:
+    # Les mots de passe d'application Google s'affichent « abcd efgh ijkl mnop » : on retire
+    # tout blanc (y compris insécable) collé par erreur dans le secret.
+    utilisateur = "".join((os.environ.get("SMTP_USER") or "").split())
+    mot_de_passe = "".join((os.environ.get("SMTP_PASSWORD") or "").split())
+    return utilisateur, mot_de_passe
+
+
+def _transmettre(msg: MIMEMultipart, destinataires: list[str], utilisateur: str, mot_de_passe: str) -> None:
+    """Envoie le message : SSL (465) d'abord, puis STARTTLS (587) si le serveur coupe la connexion."""
+    hote = os.environ.get("SMTP_HOST") or "smtp.gmail.com"
+    if os.environ.get("SMTP_PORT"):
+        essais = [int(os.environ["SMTP_PORT"])]
+    else:
+        essais = [465, 587]
+    derniere: Exception | None = None
+    for port in essais:
+        try:
+            if port == 465:
+                s = smtplib.SMTP_SSL(hote, port, timeout=60)
+            else:
+                s = smtplib.SMTP(hote, port, timeout=60)
+                s.ehlo()
+                s.starttls()
+                s.ehlo()
+            with s:
+                s.login(utilisateur, mot_de_passe)
+                s.sendmail(msg["From"], destinataires, msg.as_string())
+            return
+        except smtplib.SMTPAuthenticationError as e:
+            raise ErreurMail(
+                f"{hote} refuse l'identifiant ou le mot de passe (SMTP_USER / SMTP_PASSWORD). Pour Gmail, il faut un "
+                "mot de passe d'application de 16 lettres, créé avec le compte SMTP_USER, et non le mot de passe habituel."
+            ) from e
+        except (smtplib.SMTPException, OSError) as e:
+            derniere = e
+            log.warning("Envoi par le port %s impossible : %s", port, e)
+    raise ErreurMail(
+        f"{hote} a coupé la connexion pendant l'authentification ({derniere}). Causes habituelles : mot de passe "
+        "d'application périmé ou créé pour un autre compte que SMTP_USER, validation en deux étapes non activée, ou "
+        "connexion bloquée par Google (alerte de sécurité à valider sur le compte)."
+    )
+
+
+def _message(sujet: str, corps: str, utilisateur: str, destinataires: list[str]) -> MIMEMultipart:
     msg = MIMEMultipart("alternative")
     msg["Subject"] = sujet
     msg["From"] = os.environ.get("RECAP_EXPEDITEUR") or utilisateur
     msg["To"] = ", ".join(destinataires)
     msg.attach(MIMEText(corps, "html", "utf-8"))
-    hote = os.environ.get("SMTP_HOST") or "smtp.gmail.com"
-    port = int(os.environ.get("SMTP_PORT") or "465")
-    with smtplib.SMTP_SSL(hote, port, timeout=60) as s:
-        s.login(utilisateur, mot_de_passe)
-        s.sendmail(msg["From"], destinataires, msg.as_string())
+    return msg
+
+
+def envoyer(aos: list[dict], compte_rendu: dict, profil: dict, liste: list[str] | None = None) -> bool:
+    destinataires = liste if liste is not None else globals()["destinataires"](None)
+    utilisateur, mot_de_passe = _identifiants()
+    if not (destinataires and utilisateur and mot_de_passe):
+        log.warning("Récap non envoyé : SMTP_USER, SMTP_PASSWORD ou destinataires manquants")
+        return False
+    sujet, corps = construire(aos, compte_rendu, profil)
+    _transmettre(_message(sujet, corps, utilisateur, destinataires), destinataires, utilisateur, mot_de_passe)
     log.info("Récap envoyé à %s", ", ".join(destinataires))
     return True
+
+
+def envoyer_test(liste: list[str] | None = None) -> list[str]:
+    """Petit mail de vérification (workflow « Test du mail ») : renvoie les destinataires."""
+    destinataires = liste if liste is not None else globals()["destinataires"](None)
+    utilisateur, mot_de_passe = _identifiants()
+    manque = [n for n, v in (("SMTP_USER", utilisateur), ("SMTP_PASSWORD", mot_de_passe), ("destinataires (page Équipe)", destinataires)) if not v]
+    if manque:
+        raise ErreurMail("Il manque : " + ", ".join(manque))
+    corps = "<p>Ce mail confirme que l'envoi du récapitulatif Tenders fonctionne.</p><p>Vous le recevrez chaque lundi.</p>"
+    _transmettre(_message("Tenders : test du récapitulatif", corps, utilisateur, destinataires), destinataires, utilisateur, mot_de_passe)
+    return destinataires

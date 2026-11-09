@@ -1,0 +1,29 @@
+name: Test du mail
+
+# Envoie un petit mail de vérification (30 secondes) sans lancer toute la collecte.
+# À utiliser après avoir changé SMTP_USER ou SMTP_PASSWORD.
+on:
+  workflow_dispatch:
+
+jobs:
+  mail:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Envoyer le mail de test
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          RECAP_EXPEDITEUR: ${{ vars.RECAP_EXPEDITEUR }}
+          RECAP_DESTINATAIRES: ${{ vars.RECAP_DESTINATAIRES }}
+        run: python -m veille.collect --test-mail

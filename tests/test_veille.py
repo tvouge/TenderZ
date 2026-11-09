@@ -515,3 +515,63 @@ def test_menuiserie_exterieure_conservee_a_part(store):
     # Hors sujet (nettoyage de fenêtres) : toujours écarté
     sale = boamp.vers_avis(ligne_boamp(idweb="26-200002", objet="Nettoyage des fenêtres des bâtiments communaux"))
     assert collect.integrer(store, sale, True, PROFIL) == "ignore"
+
+
+# --- envoi du mail : robustesse -----------------------------------------------------
+
+def _regler_smtp(monkeypatch, mdp="abcd efgh\u00a0ijkl mnop"):
+    for v in ("SMTP_HOST", "SMTP_PORT", "RECAP_EXPEDITEUR"):
+        monkeypatch.setenv(v, "")
+    monkeypatch.setenv("SMTP_USER", " veille.adr@gmail.com\n"); monkeypatch.setenv("SMTP_PASSWORD", mdp)
+
+
+def test_mail_espaces_retires_et_repli_sur_587(monkeypatch):
+    import smtplib
+    vus = []
+    class Coupe:   # le port 465 coupe la connexion à l'authentification, comme Gmail le 9 novembre
+        def __init__(self, hote, port, timeout): vus.append(port)
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def login(self, u, p): raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+    class Starttls:
+        def __init__(self, hote, port, timeout): vus.append(port)
+        def ehlo(self): pass
+        def starttls(self): vus.append("tls")
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def login(self, u, p): vus.append((u, p))
+        def sendmail(self, de, a, m): vus.append("envoye")
+    monkeypatch.setattr(digest.smtplib, "SMTP_SSL", Coupe)
+    monkeypatch.setattr(digest.smtplib, "SMTP", Starttls)
+    _regler_smtp(monkeypatch)
+    assert digest.envoyer_test(["lea@adr.fr"]) == ["lea@adr.fr"]
+    assert vus == [465, 587, "tls", ("veille.adr@gmail.com", "abcdefghijklmnop"), "envoye"]
+
+
+def test_mail_erreur_explicite_et_collecte_non_bloquee(monkeypatch, store):
+    import smtplib
+    class Refuse:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def login(self, u, p): raise smtplib.SMTPAuthenticationError(535, b"refused")
+    monkeypatch.setattr(digest.smtplib, "SMTP_SSL", Refuse)
+    _regler_smtp(monkeypatch)
+    with pytest.raises(digest.ErreurMail, match="mot de passe d'application"):
+        digest.envoyer_test(["lea@adr.fr"])
+    store.parametre = lambda cle: ["lea@adr.fr"]
+    cr = {"sources": {}, "resultats": {}, "erreurs": []}
+    assert collect.envoyer_recap(store, cr, PROFIL) is False   # pas d'exception : la collecte reste verte
+    assert "mot de passe d'application" in cr["recap_erreur"]
+    monkeypatch.delenv("SMTP_USER")
+    with pytest.raises(digest.ErreurMail, match="SMTP_USER"):
+        digest.envoyer_test(["lea@adr.fr"])
+
+
+def test_renotage_limite_dans_le_temps(store):
+    for i in range(3):
+        a = boamp.vers_avis(ligne_boamp(idweb=f"26-30000{i}", objet=f"Agencement d'une salle {i}"), DONNEES)
+        collect.integrer(store, a, True, PROFIL)
+        store.maj(a.id, {"notation_v": 1})
+    assert collect.renoter(store, PROFIL, budget_s=-1) == 0     # budget épuisé : rien fait, reprise plus tard
+    assert collect.renoter(store, PROFIL) == 3
